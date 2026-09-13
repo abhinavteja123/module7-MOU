@@ -9,7 +9,8 @@ do $$ begin
   create type public.mou_status as enum (
     'proposed', 'under_discussion', 'drafted', 'legal_review',
     'approval_pending', 'approved', 'signed_by_client', 'signed_by_university',
-    'signed_by_both', 'active', 'expired', 'renewal', 'terminated'
+    'signed_by_both', 'active', 'expected_renewal', 'expired', 'renewal',
+    'closed', 'terminated'
   );
 exception when duplicate_object then null;
 end $$;
@@ -17,6 +18,8 @@ end $$;
 -- Safe upgrades for projects that already ran an earlier version of this schema.
 alter type public.mou_status add value if not exists 'signed_by_university';
 alter type public.mou_status add value if not exists 'renewal';
+alter type public.mou_status add value if not exists 'expected_renewal';
+alter type public.mou_status add value if not exists 'closed';
 
 create table if not exists public.users (
   id uuid primary key default gen_random_uuid(),
@@ -80,6 +83,10 @@ create table if not exists public.status_history (
 
 create unique index if not exists one_initial_status_per_mou
   on public.status_history(mou_id) where is_initial = true;
+
+create unique index if not exists status_history_unique_mou_status_date
+  on public.status_history(mou_id, status, status_date)
+  where is_initial = false;
 
 create table if not exists public.activity_log (
   id uuid primary key default gen_random_uuid(),

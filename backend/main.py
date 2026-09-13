@@ -10,13 +10,16 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 from typing import Any, Optional
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+import httpx
+from pydantic import BaseModel, ConfigDict, Field
 import jwt
 from dotenv import load_dotenv
 
@@ -40,8 +43,10 @@ class MOUStatus(str, Enum):
     signed_by_university = "signed_by_university"
     signed_by_both = "signed_by_both"
     active = "active"
+    expected_renewal = "expected_renewal"
     expired = "expired"
     renewal = "renewal"
+    closed = "closed"
     terminated = "terminated"
 
 
@@ -59,18 +64,21 @@ class CompanyCreate(BaseModel):
     contact_name: str = Field(min_length=1, max_length=200)
     contact_email: str = Field(min_length=3, max_length=320)
     contact_phone: str = Field(min_length=3, max_length=50)
-    document_attached: bool
+    document_filename: str = Field(min_length=1, max_length=255)
+    document_content_type: str = Field(default="application/pdf")
+    document_base64: str = Field(min_length=1)
     activity_name: Optional[str] = None
     activity_notes: Optional[str] = None
     activity_date: Optional[date] = None
 
 
 class CompanyUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     company_name: str = Field(min_length=1, max_length=200)
     city: str = Field(min_length=1, max_length=120)
     mou_scope: str = Field(min_length=1, max_length=10000)
     deliverables: str = Field(min_length=1, max_length=10000)
-    effective_date: date
     expiring_date: date
     internal_spoc_name: str = Field(min_length=1, max_length=200)
     internal_spoc_email: str = Field(min_length=3, max_length=320)
@@ -112,18 +120,45 @@ class UserCreate(BaseModel):
 app = FastAPI(title="MOU Tracker API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("FRONTEND_ORIGIN", "http://localhost:5173").split(","),
+    allow_origins=[origin.strip() for origin in os.getenv("FRONTEND_ORIGIN", "http://localhost:5173").split(",")],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-supabase: Optional[Client] = None
-if create_client and os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_SERVICE_ROLE_KEY"):
-    supabase = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_ROLE_KEY"])
+supabase_url = os.getenv("SUPABASE_URL")
+supabase_service_role_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+supabase_configured = bool(create_client and supabase_url and supabase_service_role_key)
 
 jwt_secret = os.getenv("JWT_SECRET")
 jwt_expire_minutes = int(os.getenv("JWT_EXPIRE_MINUTES", "480"))
+max_pdf_bytes = int(os.getenv("MAX_PDF_BYTES", str(10 * 1024 * 1024)))
+
+
+def validate_company_dates(effective_date: date, expiring_date: date) -> None:
+    if expiring_date < effective_date:
+        raise HTTPException(422, "Expiry date must be on or after the effective / signed date")
+
+
+def safe_pdf_filename(filename: str) -> str:
+    name = re.sub(r"[^A-Za-z0-9._ -]", "_", os.path.basename(filename)).strip(". ")
+    if not name.lower().endswith(".pdf"):
+        name = f"{name or 'mou-signed-copy'}.pdf"
+    return name[:255]
+
+
+def decode_pdf(document_base64: str, content_type: str) -> bytes:
+    if content_type.lower() != "application/pdf":
+        raise HTTPException(415, "Only PDF files are accepted")
+    try:
+        document = base64.b64decode(document_base64, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(422, "The MOU signed copy is not valid PDF data") from exc
+    if not document.startswith(b"%PDF-"):
+        raise HTTPException(422, "The MOU signed copy must be a valid PDF file")
+    if len(document) > max_pdf_bytes:
+        raise HTTPException(413, f"PDF files must be {max_pdf_bytes // 1024 // 1024} MB or smaller")
+    return document
 
 
 def password_hash(password: str, salt: Optional[bytes] = None) -> str:
@@ -178,12 +213,23 @@ def audit_change(db: Client, entity_type: str, entity_id: str, field_name: str, 
 def startup() -> None:
     if not jwt_secret:
         raise RuntimeError("JWT_SECRET must be configured")
+    if not supabase_configured:
+        raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be configured")
 
 
 def require_supabase() -> Client:
-    if not supabase:
+    if not supabase_configured or not create_client:
         raise HTTPException(503, "Supabase is not configured on the API")
-    return supabase
+    # The synchronous Supabase client maintains an HTTP connection pool. A fresh
+    # client for each FastAPI request avoids shared-client HTTP/2 read errors
+    # when the browser polls companies and users concurrently.
+    return create_client(supabase_url, supabase_service_role_key)
+
+
+@app.exception_handler(httpx.HTTPError)
+async def supabase_transport_error(_: Request, exc: httpx.HTTPError) -> JSONResponse:
+    logging.exception("Supabase transport error", exc_info=exc)
+    return JSONResponse(status_code=503, content={"detail": "The database is temporarily unavailable. Please retry."})
 
 
 def current_user(authorization: Optional[str] = Header(default=None), db: Client = Depends(require_supabase)) -> dict:
@@ -193,10 +239,19 @@ def current_user(authorization: Optional[str] = Header(default=None), db: Client
     token = authorization.split(" ", 1)[1]
     try:
         claims = jwt.decode(token, jwt_secret, algorithms=["HS256"])
-        profile = db.table("users").select("*").eq("id", claims["sub"]).single().execute().data
-        return profile
-    except Exception as exc:
+        user_id = claims["sub"]
+    except (jwt.PyJWTError, KeyError, TypeError) as exc:
         raise HTTPException(401, "Invalid or expired app JWT") from exc
+    try:
+        profiles = db.table("users").select("*").eq("id", user_id).limit(1).execute().data or []
+    except httpx.HTTPError:
+        raise
+    except Exception as exc:
+        logging.exception("Could not load app JWT user profile")
+        raise HTTPException(503, "The database is temporarily unavailable. Please retry.") from exc
+    if not profiles:
+        raise HTTPException(401, "Invalid or expired app JWT")
+    return profiles[0]
 
 
 def one(db: Client, table: str, **filters: str) -> dict:
@@ -227,7 +282,7 @@ def company_payload(db: Client, company: dict, mou: dict, user_map: dict[str, di
 
 @app.get("/health")
 def health() -> dict:
-    return {"ok": True, "supabase_configured": supabase is not None, "timestamp": datetime.now(timezone.utc)}
+    return {"ok": True, "supabase_configured": supabase_configured, "timestamp": datetime.now(timezone.utc)}
 
 
 @app.post("/auth/login")
@@ -235,11 +290,15 @@ def login(payload: LoginRequest, db: Client = Depends(require_supabase)) -> dict
     if not jwt_secret:
         raise HTTPException(503, "JWT_SECRET is not configured")
     try:
-        profile = db.table("users").select("*").eq("email", payload.email.strip().lower()).single().execute().data
+        profiles = db.table("users").select("*").eq("email", payload.email.strip().lower()).limit(1).execute().data or []
+    except httpx.HTTPError:
+        raise
     except Exception as exc:
-        raise HTTPException(401, "Invalid email or password") from exc
-    if not profile or not password_matches(payload.password, profile.get("password_hash", "")):
+        logging.exception("Could not load login profile")
+        raise HTTPException(503, "The database is temporarily unavailable. Please retry.") from exc
+    if not profiles or not password_matches(payload.password, profiles[0].get("password_hash", "")):
         raise HTTPException(401, "Invalid email or password")
+    profile = profiles[0]
     now = datetime.now(timezone.utc)
     claims = {"sub": profile["id"], "email": profile["email"], "iat": now, "exp": now.timestamp() + (jwt_expire_minutes * 60)}
     token = jwt.encode(claims, jwt_secret, algorithm="HS256")
@@ -280,21 +339,31 @@ def get_company(company_id: str, db: Client = Depends(require_supabase), _: dict
 
 @app.post("/companies", status_code=201)
 def create_company(payload: CompanyCreate, db: Client = Depends(require_supabase), user: dict = Depends(current_user)) -> dict:
-    if not payload.document_attached:
-        raise HTTPException(422, "MOU signed copy is required when creating a company")
+    validate_company_dates(payload.effective_date, payload.expiring_date)
     if payload.activity_name and not payload.activity_date:
         raise HTTPException(422, "Activity date is required when a primary activity is entered")
-    company = db.table("company").insert({"company_name": payload.company_name, "city": payload.city, "created_by": user["id"]}).execute().data[0]
+    if payload.activity_date and not payload.activity_name:
+        raise HTTPException(422, "A primary activity is required when an activity date is entered")
+    document = decode_pdf(payload.document_base64, payload.document_content_type)
+    filename = safe_pdf_filename(payload.document_filename)
+    company: Optional[dict] = None
+    document_path: Optional[str] = None
     mou_data = {
-        "company_id": company["id"], "mou_scope": payload.mou_scope, "deliverables": payload.deliverables,
-        "effective_date": payload.effective_date.isoformat(), "expiring_date": payload.expiring_date.isoformat(), "current_status": payload.initial_status.value,
+        "mou_scope": payload.mou_scope, "deliverables": payload.deliverables,
+        "effective_date": payload.effective_date.isoformat(), "expiring_date": payload.expiring_date.isoformat(),
+        "current_status": payload.initial_status.value,
         "internal_spoc_name": payload.internal_spoc_name, "internal_spoc_email": payload.internal_spoc_email,
         "internal_spoc_phone": payload.internal_spoc_phone, "created_by": user["id"], "updated_by": user["id"],
     }
     try:
+        company = db.table("company").insert({"company_name": payload.company_name, "city": payload.city, "created_by": user["id"]}).execute().data[0]
+        mou_data["company_id"] = company["id"]
         mou = db.table("mou").insert(mou_data).execute().data[0]
         db.table("status_history").insert({"mou_id": mou["id"], "status": payload.initial_status.value, "status_date": payload.effective_date.isoformat(), "changed_by": user["id"], "is_initial": True}).execute()
         contact = db.table("contact_details").insert({"mou_id": mou["id"], "contact_name": payload.contact_name, "email": payload.contact_email, "phone": payload.contact_phone}).execute().data[0]
+        document_path = f"{company['id']}/{mou['id']}/{filename}"
+        db.storage.from_("mou-pdfs").upload(document_path, document, {"content-type": "application/pdf", "upsert": "false"})
+        mou = db.table("mou").update({"pdf_url": document_path, "updated_by": user["id"]}).eq("id", mou["id"]).execute().data[0]
         if payload.activity_name:
             db.table("activity_log").insert({"company_id": company["id"], "activity_name": payload.activity_name, "activity_notes": payload.activity_notes, "description": payload.activity_name, "activity_date": payload.activity_date.isoformat() if payload.activity_date else None, "created_by": user["id"]}).execute()
         for field_name, value in (("company_name", payload.company_name), ("city", payload.city)):
@@ -308,11 +377,18 @@ def create_company(payload: CompanyCreate, db: Client = Depends(require_supabase
             audit_change(db, "mou", mou["id"], field_name, None, value, user["id"])
         for field_name, value in (("contact_name", payload.contact_name), ("email", payload.contact_email), ("phone", payload.contact_phone)):
             audit_change(db, "contact", contact["id"], field_name, None, value, user["id"])
+        audit_change(db, "mou", mou["id"], "signed_copy", None, document_path, user["id"])
         if payload.activity_name:
             audit_change(db, "company", company["id"], "activity", None, {"name": payload.activity_name, "notes": payload.activity_notes, "date": payload.activity_date}, user["id"])
     except Exception as exc:
-        db.table("company").delete().eq("id", company["id"]).execute()
-        logging.exception("Company creation failed for %s", company.get("id"))
+        if document_path:
+            try:
+                db.storage.from_("mou-pdfs").remove([document_path])
+            except Exception:
+                logging.exception("Could not remove failed MOU PDF upload")
+        if company:
+            db.table("company").delete().eq("id", company["id"]).execute()
+        logging.exception("Company creation failed")
         raise HTTPException(400, "Could not create the company and MOU record") from exc
     return {"data": company_payload(db, company, mou, {user["id"]: user})}
 
@@ -321,12 +397,13 @@ def create_company(payload: CompanyCreate, db: Client = Depends(require_supabase
 def update_company(company_id: str, payload: CompanyUpdate, db: Client = Depends(require_supabase), user: dict = Depends(current_user)) -> dict:
     company = one(db, "company", id=company_id)
     mou = one(db, "mou", company_id=company_id)
+    effective_date = date.fromisoformat(str(mou["effective_date"]))
+    validate_company_dates(effective_date, payload.expiring_date)
     contacts = db.table("contact_details").select("*").eq("mou_id", mou["id"]).order("created_at").limit(1).execute().data or []
     updated_company = db.table("company").update({"company_name": payload.company_name, "city": payload.city}).eq("id", company_id).execute().data[0]
     updated_mou = db.table("mou").update({
         "mou_scope": payload.mou_scope,
         "deliverables": payload.deliverables,
-        "effective_date": payload.effective_date.isoformat(),
         "expiring_date": payload.expiring_date.isoformat(),
         "internal_spoc_name": payload.internal_spoc_name,
         "internal_spoc_email": payload.internal_spoc_email,
@@ -342,7 +419,7 @@ def update_company(company_id: str, payload: CompanyUpdate, db: Client = Depends
         audit_change(db, "company", company_id, field_name, old_value, new_value, user["id"])
     for field_name, old_value, new_value in (
         ("mou_scope", mou.get("mou_scope"), payload.mou_scope), ("deliverables", mou.get("deliverables"), payload.deliverables),
-        ("effective_date", mou.get("effective_date"), payload.effective_date), ("expiring_date", mou.get("expiring_date"), payload.expiring_date),
+        ("expiring_date", mou.get("expiring_date"), payload.expiring_date),
         ("internal_spoc_name", mou.get("internal_spoc_name"), payload.internal_spoc_name), ("internal_spoc_email", mou.get("internal_spoc_email"), payload.internal_spoc_email),
         ("internal_spoc_phone", mou.get("internal_spoc_phone"), payload.internal_spoc_phone),
     ):
@@ -356,11 +433,51 @@ def update_company(company_id: str, payload: CompanyUpdate, db: Client = Depends
 @app.post("/mous/{mou_id}/status")
 def change_status(mou_id: str, payload: StatusChange, db: Client = Depends(require_supabase), user: dict = Depends(current_user)) -> dict:
     mou = one(db, "mou", id=mou_id)
-    db.table("status_history").insert({"mou_id": mou_id, "status": payload.status.value, "status_date": payload.status_date.isoformat(), "changed_by": user["id"], "notes": payload.notes, "is_initial": False}).execute()
-    result = db.table("mou").update({"current_status": payload.status.value, "updated_by": user["id"]}).eq("id", mou_id).execute()
-    audit_change(db, "mou", mou_id, "status", mou.get("current_status"), {"status": payload.status.value, "date": payload.status_date}, user["id"])
-    if payload.notes:
-        audit_change(db, "mou", mou_id, "status_notes", None, payload.notes, user["id"])
+    if mou.get("current_status") == payload.status.value:
+        raise HTTPException(409, "This status is already current. Choose a different status before saving.")
+
+    same_status_on_date = (
+        db.table("status_history")
+        .select("id")
+        .eq("mou_id", mou_id)
+        .eq("status", payload.status.value)
+        .eq("status_date", payload.status_date.isoformat())
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    if same_status_on_date:
+        raise HTTPException(409, "This status has already been recorded for the selected date.")
+
+    # Conditional update makes the current status an optimistic concurrency
+    # guard: only one simultaneous request can move the MOU out of its current
+    # state. This prevents duplicate history rows even before the database
+    # unique-index migration is applied.
+    result = (
+        db.table("mou")
+        .update({"current_status": payload.status.value, "updated_by": user["id"]})
+        .eq("id", mou_id)
+        .eq("current_status", mou["current_status"])
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(409, "This MOU was updated by another admin. Refresh and try again.")
+    try:
+        db.table("status_history").insert({"mou_id": mou_id, "status": payload.status.value, "status_date": payload.status_date.isoformat(), "changed_by": user["id"], "notes": payload.notes, "is_initial": False}).execute()
+    except Exception as exc:
+        # Keep the current state consistent with history if its insert fails.
+        db.table("mou").update({"current_status": mou["current_status"], "updated_by": user["id"]}).eq("id", mou_id).eq("current_status", payload.status.value).execute()
+        raise HTTPException(503, "Could not record the status change. Please retry.") from exc
+    try:
+        audit_change(db, "mou", mou_id, "status", mou.get("current_status"), {"status": payload.status.value, "date": payload.status_date}, user["id"])
+        if payload.notes:
+            audit_change(db, "mou", mou_id, "status_notes", None, payload.notes, user["id"])
+    except Exception:
+        # The status and its immutable history are the source of truth. Keep
+        # a successful change rather than inviting a retry that could repeat it
+        # if an ancillary audit write has a transient transport failure.
+        logging.exception("Could not append audit entries for MOU %s", mou_id)
     return {"data": result.data[0]}
 
 
@@ -369,6 +486,23 @@ def correct_status(history_id: str, payload: StatusCorrection, db: Client = Depe
     history = one(db, "status_history", id=history_id)
     if history["is_initial"]:
         raise HTTPException(409, "The initial status is permanently locked and cannot be edited")
+    status_date = payload.status_date or date.fromisoformat(history["status_date"])
+    status_changed = payload.status.value != history["status"] or status_date.isoformat() != history["status_date"]
+    if status_changed:
+        duplicate = (
+            db.table("status_history")
+            .select("id")
+            .eq("mou_id", history["mou_id"])
+            .eq("status", payload.status.value)
+            .eq("status_date", status_date.isoformat())
+            .neq("id", history_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        if duplicate:
+            raise HTTPException(409, "This status has already been recorded for the selected date.")
     status_update = {"status": payload.status.value, "notes": payload.notes, "edited_by": user["id"], "edited_at": datetime.now(timezone.utc).isoformat()}
     if payload.status_date:
         status_update["status_date"] = payload.status_date.isoformat()
@@ -376,7 +510,8 @@ def correct_status(history_id: str, payload: StatusCorrection, db: Client = Depe
     latest = db.table("status_history").select("*").eq("mou_id", history["mou_id"]).order("changed_at", desc=True).limit(1).execute().data[0]
     if latest["id"] == history_id:
         db.table("mou").update({"current_status": payload.status.value, "updated_by": user["id"]}).eq("id", history["mou_id"]).execute()
-    audit_change(db, "mou", history["mou_id"], "status", history.get("status"), {"status": payload.status.value, "date": payload.status_date or history.get("status_date")}, user["id"])
+    if status_changed:
+        audit_change(db, "mou", history["mou_id"], "status", {"status": history.get("status"), "date": history.get("status_date")}, {"status": payload.status.value, "date": status_date}, user["id"])
     if payload.notes != history.get("notes"):
         audit_change(db, "mou", history["mou_id"], "status_notes", history.get("notes"), payload.notes, user["id"])
     return {"data": updated}
@@ -395,8 +530,13 @@ async def upload_pdf(mou_id: str, file: UploadFile = File(...), db: Client = Dep
     if file.content_type != "application/pdf":
         raise HTTPException(415, "Only PDF files are accepted")
     mou = one(db, "mou", id=mou_id)
-    path = f"{mou['company_id']}/{mou_id}/{file.filename or 'mou.pdf'}"
-    db.storage.from_("mou-pdfs").upload(path, await file.read(), {"content-type": "application/pdf", "upsert": "true"})
+    document = await file.read()
+    if not document.startswith(b"%PDF-"):
+        raise HTTPException(422, "The MOU signed copy must be a valid PDF file")
+    if len(document) > max_pdf_bytes:
+        raise HTTPException(413, f"PDF files must be {max_pdf_bytes // 1024 // 1024} MB or smaller")
+    path = f"{mou['company_id']}/{mou_id}/{safe_pdf_filename(file.filename or 'mou-signed-copy.pdf')}"
+    db.storage.from_("mou-pdfs").upload(path, document, {"content-type": "application/pdf", "upsert": "true"})
     db.table("mou").update({"pdf_url": path, "updated_by": user["id"]}).eq("id", mou_id).execute()
     audit_change(db, "mou", mou_id, "signed_copy", mou.get("pdf_url"), path, user["id"])
     return {"data": {"path": path, "filename": file.filename}}

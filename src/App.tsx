@@ -1,4 +1,11 @@
-import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import {
+  ChangeEvent,
+  FormEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   Activity,
   ArrowDownToLine,
@@ -18,7 +25,6 @@ import {
   Paperclip,
   Plus,
   Search,
-  Settings2,
   ShieldCheck,
   Sparkles,
   UploadCloud,
@@ -50,8 +56,10 @@ type Status =
   | "Signed by university"
   | "Signed by both"
   | "Active"
+  | "Expected renewal"
   | "Expired"
   | "Renewal"
+  | "Closed"
   | "Terminated";
 type User = {
   name: string;
@@ -66,6 +74,7 @@ type ActivityItem = {
   title: string;
   note: string;
   date: string;
+  isoDate?: string;
   user: User;
 };
 type AuditEvent = {
@@ -81,6 +90,7 @@ type AuditEvent = {
 type Company = {
   id: number | string;
   mouId?: string;
+  createdAt?: string;
   name: string;
   city?: string;
   logo: string;
@@ -135,9 +145,36 @@ const statuses: Status[] = [
   "Signed by university",
   "Signed by both",
   "Active",
+  "Expected renewal",
   "Expired",
   "Renewal",
+  "Closed",
   "Terminated",
+];
+const statusGroups: { label: string; statuses: Status[] }[] = [
+  {
+    label: "Preparation",
+    statuses: ["Proposed", "Under discussion", "Drafted"],
+  },
+  {
+    label: "Review & approval",
+    statuses: ["Legal review", "Approval pending", "Approved"],
+  },
+  {
+    label: "Signing",
+    statuses: ["Signed by client", "Signed by university", "Signed by both"],
+  },
+  {
+    label: "Lifecycle",
+    statuses: [
+      "Active",
+      "Expected renewal",
+      "Renewal",
+      "Expired",
+      "Closed",
+      "Terminated",
+    ],
+  },
 ];
 const seedCompanies: Company[] = [
   {
@@ -258,6 +295,13 @@ function formatDateForInput(value: string) {
 function todayInput() {
   return new Date().toISOString().slice(0, 10);
 }
+async function fileToBase64(file: File) {
+  const buffer = await file.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
 function formatDate(value: string) {
   if (!value) return "—";
   const date = new Date(`${value}T00:00:00`);
@@ -293,6 +337,52 @@ function displayDateTime(value?: string) {
         minute: "2-digit",
       });
 }
+function previousCalendarMonth(reference = new Date()) {
+  const end = new Date(reference.getFullYear(), reference.getMonth(), 1);
+  const start = new Date(reference.getFullYear(), reference.getMonth() - 1, 1);
+  return {
+    start,
+    end,
+    label: start.toLocaleDateString("en-US", { month: "long" }),
+  };
+}
+function isTerminalStatus(status: Status) {
+  return ["Expired", "Closed", "Terminated"].includes(status);
+}
+function hasActivityInPreviousMonth(company: Company, reference = new Date()) {
+  const { start, end } = previousCalendarMonth(reference);
+  const createdAt = company.createdAt ? new Date(company.createdAt) : null;
+  if (createdAt && createdAt >= end) return true;
+  return company.activities.some((activity) => {
+    const isoDate = activity.isoDate || formatDateForInput(activity.date);
+    const activityDate = isoDate ? new Date(`${isoDate}T00:00:00`) : null;
+    return Boolean(activityDate && activityDate >= start && activityDate < end);
+  });
+}
+function needsMonthlyActivityFollowUp(
+  company: Company,
+  reference = new Date(),
+) {
+  return (
+    !isTerminalStatus(company.status) &&
+    !hasActivityInPreviousMonth(company, reference)
+  );
+}
+function expiresWithinThirtyDays(company: Company, reference = new Date()) {
+  if (isTerminalStatus(company.status)) return false;
+  const expiry = formatDateForInput(company.expiryDate);
+  if (!expiry) return false;
+  const today = new Date(
+    reference.getFullYear(),
+    reference.getMonth(),
+    reference.getDate(),
+  );
+  const expiryDate = new Date(`${expiry}T00:00:00`);
+  const daysUntilExpiry = Math.ceil(
+    (expiryDate.getTime() - today.getTime()) / 86_400_000,
+  );
+  return daysUntilExpiry >= 0 && daysUntilExpiry <= 30;
+}
 function statusValue(value: Status) {
   return value.toLowerCase().replace(/ /g, "_");
 }
@@ -308,8 +398,10 @@ function statusLabel(value: string): Status {
     signed_by_university: "Signed by university",
     signed_by_both: "Signed by both",
     active: "Active",
+    expected_renewal: "Expected renewal",
     expired: "Expired",
     renewal: "Renewal",
+    closed: "Closed",
     terminated: "Terminated",
   };
   return labels[value] ?? (value as Status);
@@ -347,6 +439,7 @@ function fromApiCompany(record: any): Company {
       date: entry.activity_date
         ? displayDate(entry.activity_date)
         : displayDate(entry.created_at),
+      isoDate: entry.activity_date || entry.created_at,
       user: apiUser(entry.created_by_user),
     }),
   );
@@ -354,6 +447,7 @@ function fromApiCompany(record: any): Company {
   return {
     id: record.id,
     mouId: mou.id,
+    createdAt: record.created_at,
     name: record.company_name,
     city: record.city || "—",
     logo: initials(record.company_name),
@@ -401,11 +495,13 @@ function Avatar({ user, small = false }: { user: User; small?: boolean }) {
 }
 
 function App() {
-  const [companies, setCompanies] = useState(seedCompanies);
-  const [adminUsers, setAdminUsers] = useState(users);
+  const [companies, setCompanies] = useState<Company[]>(
+    isLiveMode ? [] : seedCompanies,
+  );
+  const [adminUsers, setAdminUsers] = useState<User[]>(isLiveMode ? [] : users);
   const [selectedId, setSelectedId] = useState<number | string | null>(null);
   const [view, setView] = useState<
-    "overview" | "companies" | "activities" | "admin" | "settings"
+    "overview" | "companies" | "activities" | "admin"
   >("overview");
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"All statuses" | Status>(
@@ -424,8 +520,8 @@ function App() {
   useEffect(() => {
     if (!isLiveMode || !authUser) return;
     let cancelled = false;
-    const load = async () => {
-      setSyncState("syncing");
+    const load = async (showInitialLoading = false) => {
+      if (showInitialLoading) setSyncState("syncing");
       try {
         const [companyResult, userResult] = await Promise.all([
           getLiveCompanies(),
@@ -441,8 +537,8 @@ function App() {
         if (!cancelled) setSyncState("error");
       }
     };
-    void load();
-    const interval = window.setInterval(load, 15000);
+    void load(true);
+    const interval = window.setInterval(() => void load(), 15000);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
@@ -461,52 +557,63 @@ function App() {
       ),
     [companies, query, statusFilter],
   );
-  const activeCount = companies.filter(
-    (company) => company.status === "Active",
-  ).length;
-  const attentionCount = companies.filter((company) =>
-    ["Legal review", "Approval pending", "Signed by client"].includes(
-      company.status,
-    ),
-  ).length;
-  const expiringCount = companies.filter(
-    (company) => company.status === "Expired",
-  ).length;
+  const statusCounts = useMemo(
+    () =>
+      Object.fromEntries(
+        statuses.map((status) => [
+          status,
+          companies.filter((company) => company.status === status).length,
+        ]),
+      ) as Record<Status, number>,
+    [companies],
+  );
+  const expiringSoonCompanies = useMemo(
+    () =>
+      companies.filter((company) =>
+        expiresWithinThirtyDays(company, new Date()),
+      ),
+    [companies],
+  );
   if (isLiveMode && !authUser)
     return <AuthScreen onAuthenticated={setAuthUser} />;
   async function saveCompany(company: Company) {
     if (isLiveMode) {
       try {
+        if (!company.mouId && !company.documentFile)
+          throw new Error("A signed MOU PDF is required to create the record.");
         const effectiveDateValue = formatDateForInput(company.effectiveDate);
         const activityDateValue = company.activities[0]?.date
           ? formatDateForInput(company.activities[0].date)
           : "";
-        const payload = {
+        const updatePayload = {
           company_name: company.name,
           city: company.city,
           mou_scope: company.scope,
           deliverables: company.deliverables,
-          effective_date: effectiveDateValue,
           expiring_date: formatDateForInput(company.expiryDate),
-          initial_status: statusValue(company.status),
           internal_spoc_name: company.spoc.name,
           internal_spoc_email: company.spoc.email,
           internal_spoc_phone: company.spoc.phone,
           contact_name: company.contactName,
           contact_email: company.contactEmail,
           contact_phone: company.contactPhone,
-          document_attached: Boolean(company.documentFile || company.document),
         };
         const result = company.mouId
-          ? await updateLiveCompany(String(company.id), payload)
+          ? await updateLiveCompany(String(company.id), updatePayload)
           : await createLiveCompany({
-              ...payload,
+              ...updatePayload,
+              effective_date: effectiveDateValue,
+              initial_status: statusValue(company.status),
+              document_filename: company.documentFile!.name,
+              document_content_type:
+                company.documentFile!.type || "application/pdf",
+              document_base64: await fileToBase64(company.documentFile!),
               activity_name: company.activities[0]?.title || null,
               activity_notes: company.activities[0]?.note || null,
               activity_date: activityDateValue || null,
             });
         const saved = fromApiCompany(result.data);
-        if (company.documentFile && saved.mouId)
+        if (company.mouId && company.documentFile && saved.mouId)
           await uploadLivePdf(saved.mouId, company.documentFile);
         const savedWithDocument = company.documentFile
           ? {
@@ -586,12 +693,6 @@ function App() {
           >
             <ShieldCheck size={17} /> Admin access
           </button>
-          <button
-            className={`nav-item ${view === "settings" ? "active" : ""}`}
-            onClick={() => setView("settings")}
-          >
-            <Settings2 size={17} /> Settings
-          </button>
         </nav>
         <div className="sidebar-footer">
           <div className="help-card">
@@ -627,9 +728,7 @@ function App() {
                   ? "Companies"
                   : view === "activities"
                     ? "Activities"
-                    : view === "admin"
-                      ? "Admin access"
-                      : "Settings"}
+                    : "Admin access"}
             </strong>
           </div>
           <div className="top-actions">
@@ -665,7 +764,7 @@ function App() {
                 documents and activities.
               </p>
             </div>
-            {!["admin", "settings"].includes(view) && (
+            {view !== "admin" && (
               <button
                 className="primary-button"
                 onClick={() => setShowAddModal(true)}
@@ -676,42 +775,74 @@ function App() {
           </div>
           {view === "admin" ? (
             <AdminAccessPage adminUsers={adminUsers} activeUser={activeUser} />
-          ) : view === "settings" ? (
-            <SettingsPage syncState={syncState} />
           ) : view === "activities" ? (
             <ActivityFeed companies={companies} />
           ) : (
             <section className="portfolio-section">
               {view === "overview" && (
-                <section className="stats-grid">
-                  <StatCard
-                    label="Active MOUs"
-                    value={activeCount}
-                    detail="Current agreements"
-                    icon={<FileText size={18} />}
-                    tone="green"
-                  />
-                  <StatCard
-                    label="Needs your attention"
-                    value={attentionCount}
-                    detail="Awaiting a next step"
-                    icon={<Clock3 size={18} />}
-                    tone="orange"
-                  />
-                  <StatCard
-                    label="Expired MOUs"
-                    value={expiringCount}
-                    detail="Review renewal options"
-                    icon={<CalendarDays size={18} />}
-                    tone="purple"
-                  />
-                  <StatCard
-                    label="Total companies"
-                    value={companies.length}
-                    detail="In this workspace"
-                    icon={<Users size={18} />}
-                    tone="blue"
-                  />
+                <section
+                  className="status-overview"
+                  aria-label="MOU status summary"
+                >
+                  <div className="status-overview-header">
+                    <div>
+                      <span className="eyebrow">Portfolio snapshot</span>
+                      <h2>Status distribution</h2>
+                    </div>
+                    <span>{companies.length} total MOUs</span>
+                  </div>
+                  <div
+                    className="portfolio-kpi-strip"
+                    aria-label="MOU health KPIs"
+                  >
+                    <div className="portfolio-kpi portfolio-kpi-expiry">
+                      <span>Expires in 30 days</span>
+                      <strong>{expiringSoonCompanies.length}</strong>
+                      <small>
+                        {expiringSoonCompanies.length === 1
+                          ? "Agreement needs a renewal decision"
+                          : "Agreements need renewal decisions"}
+                      </small>
+                    </div>
+                  </div>
+                  {syncState === "syncing" && companies.length === 0 ? (
+                    <div className="status-cards-loading">
+                      <Clock3 size={19} />
+                      <div>
+                        <strong>Loading MOU statuses</strong>
+                        <span>Fetching the current records from Supabase…</span>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="status-group-grid">
+                      {statusGroups.map((group) => (
+                        <section className="status-group" key={group.label}>
+                          <h3>{group.label}</h3>
+                          <div className="status-chip-grid">
+                            {group.statuses.map((status) => (
+                              <button
+                                type="button"
+                                className={`status-summary-chip ${statusValue(status)}`}
+                                key={status}
+                                aria-label={`Show ${status} MOUs`}
+                                onClick={() => {
+                                  setStatusFilter(status);
+                                  setShowFilters(true);
+                                  setView("companies");
+                                }}
+                              >
+                                <span className="status-summary-label">
+                                  <i />
+                                  {status}
+                                </span>
+                                <strong>{statusCounts[status]}</strong>
+                              </button>
+                            ))}
+                          </div>
+                        </section>
+                      ))}
+                    </div>
+                  )}
                 </section>
               )}
               {view === "overview" && (
@@ -875,9 +1006,25 @@ function App() {
                 </table>
                 {filteredCompanies.length === 0 && (
                   <div className="empty-state">
-                    <Search size={24} />
-                    <strong>No MOUs match that search</strong>
-                    <span>Try another company, scope or status.</span>
+                    {syncState === "syncing" ? (
+                      <Clock3 size={24} />
+                    ) : (
+                      <Search size={24} />
+                    )}
+                    <strong>
+                      {syncState === "syncing"
+                        ? "Loading MOU records from Supabase"
+                        : syncState === "error"
+                          ? "Could not load MOU records"
+                          : "No MOUs match that search"}
+                    </strong>
+                    <span>
+                      {syncState === "syncing"
+                        ? "The workspace will populate as soon as the live request finishes."
+                        : syncState === "error"
+                          ? "Check the API connection, then refresh the page."
+                          : "Try another company, scope or status."}
+                    </span>
                   </div>
                 )}
               </div>
@@ -928,29 +1075,6 @@ function App() {
   );
 }
 
-function StatCard({
-  label,
-  value,
-  detail,
-  icon,
-  tone,
-}: {
-  label: string;
-  value: number;
-  detail: string;
-  icon: React.ReactNode;
-  tone: string;
-}) {
-  return (
-    <div className="stat-card">
-      <div className={`stat-icon ${tone}`}>{icon}</div>
-      <div className="stat-label">{label}</div>
-      <div className="stat-value">{value}</div>
-      <div className="stat-detail">{detail}</div>
-    </div>
-  );
-}
-
 function CompanyDrawer({
   company,
   activeUser,
@@ -970,6 +1094,9 @@ function CompanyDrawer({
   const [showStatusEdit, setShowStatusEdit] = useState(false);
   const [pendingStatus, setPendingStatus] = useState<Status>(company.status);
   const [statusDate, setStatusDate] = useState(todayInput());
+  const [savingStatus, setSavingStatus] = useState(false);
+  const [statusError, setStatusError] = useState("");
+  const statusSaveInFlight = useRef(false);
   const [activityTitle, setActivityTitle] = useState("");
   const [activityNote, setActivityNote] = useState("");
   const [activityDate, setActivityDate] = useState("");
@@ -977,12 +1104,23 @@ function CompanyDrawer({
   function startStatusEdit() {
     setPendingStatus(company.status);
     setStatusDate(todayInput());
+    setStatusError("");
     setShowStatusEdit(true);
   }
 
   async function saveStatus() {
-    if (!statusDate || pendingStatus === company.status)
-      return setShowStatusEdit(false);
+    if (statusSaveInFlight.current) return;
+    if (!statusDate) {
+      setStatusError("A status date is required.");
+      return;
+    }
+    if (pendingStatus === company.status) {
+      setStatusError("Choose a different status before saving.");
+      return;
+    }
+    statusSaveInFlight.current = true;
+    setSavingStatus(true);
+    setStatusError("");
     try {
       if (isLiveMode && company.mouId)
         await changeLiveStatus(company.mouId, {
@@ -1007,6 +1145,18 @@ function CompanyDrawer({
       setShowStatusEdit(false);
     } catch (error) {
       console.error(error);
+      const message =
+        error instanceof Error ? error.message : "Unable to save the status.";
+      try {
+        setStatusError(
+          JSON.parse(message).detail || "Unable to save the status.",
+        );
+      } catch {
+        setStatusError(message);
+      }
+    } finally {
+      statusSaveInFlight.current = false;
+      setSavingStatus(false);
     }
   }
 
@@ -1027,6 +1177,7 @@ function CompanyDrawer({
           activityNote.trim() ||
           "Primary activity logged from the MOU workspace.",
         date: formatDate(activityDate),
+        isoDate: activityDate,
         user: activeUser,
       };
       onSave({
@@ -1106,9 +1257,11 @@ function CompanyDrawer({
                 <select
                   autoFocus
                   value={pendingStatus}
-                  onChange={(event) =>
-                    setPendingStatus(event.target.value as Status)
-                  }
+                  onChange={(event) => {
+                    setPendingStatus(event.target.value as Status);
+                    setStatusError("");
+                  }}
+                  disabled={savingStatus}
                 >
                   {statuses.map((status) => (
                     <option key={status}>{status}</option>
@@ -1120,14 +1273,23 @@ function CompanyDrawer({
                     required
                     type="date"
                     value={statusDate}
-                    onChange={(event) => setStatusDate(event.target.value)}
+                    onChange={(event) => {
+                      setStatusDate(event.target.value);
+                      setStatusError("");
+                    }}
+                    disabled={savingStatus}
                   />
                 </label>
+                {statusError && <p className="status-error">{statusError}</p>}
                 <div className="status-editor-actions">
                   <button
                     className="secondary-button"
                     type="button"
-                    onClick={() => setShowStatusEdit(false)}
+                    onClick={() => {
+                      setStatusError("");
+                      setShowStatusEdit(false);
+                    }}
+                    disabled={savingStatus}
                   >
                     Cancel
                   </button>
@@ -1135,8 +1297,9 @@ function CompanyDrawer({
                     className="primary-button compact"
                     type="button"
                     onClick={saveStatus}
+                    disabled={savingStatus}
                   >
-                    Save
+                    {savingStatus ? "Saving…" : "Save"}
                   </button>
                 </div>
               </div>
@@ -1177,6 +1340,12 @@ function CompanyDrawer({
             onClick={() => setTab("activities")}
           >
             Activities <span>{company.activities.length}</span>
+            {needsMonthlyActivityFollowUp(company) && (
+              <em
+                className="activity-follow-up-dot"
+                title="No activity last month"
+              />
+            )}
           </button>
           <button
             className={tab === "audit" ? "active" : ""}
@@ -1209,6 +1378,20 @@ function CompanyDrawer({
                 label="Expiry date"
                 value={company.expiryDate}
                 warning={company.status === "Expired"}
+              />
+              <InfoItem
+                label={`Activity in ${previousCalendarMonth().label}`}
+                value={
+                  hasActivityInPreviousMonth(company)
+                    ? "Activity logged"
+                    : "No activity last month"
+                }
+                sub={
+                  hasActivityInPreviousMonth(company)
+                    ? "Monthly activity requirement met"
+                    : "Add an activity to keep this MOU on track"
+                }
+                warning={needsMonthlyActivityFollowUp(company)}
               />
               <InfoItem label="MOU scope" value={company.scope} full />
               <InfoItem
@@ -1334,6 +1517,19 @@ function CompanyDrawer({
         )}
         {tab === "activities" && (
           <div className="drawer-body">
+            {needsMonthlyActivityFollowUp(company) && (
+              <div className="activity-monthly-alert">
+                <Activity size={17} />
+                <div>
+                  <strong>
+                    No activity in {previousCalendarMonth().label}
+                  </strong>
+                  <span>
+                    Add this month’s MOU activity to keep the record on track.
+                  </span>
+                </div>
+              </div>
+            )}
             <form className="activity-form" onSubmit={addActivity}>
               <div className="form-title">
                 <Activity size={17} />
@@ -1439,18 +1635,51 @@ function AuditLog({ events }: { events: AuditEvent[] }) {
     activity: "Primary activity",
     signed_copy: "MOU signed copy",
   };
-  function friendly(value?: string | null) {
-    if (!value) return "—";
+  function valueFromAudit(value?: string | null) {
+    if (!value) return null;
     try {
-      const parsed = JSON.parse(value);
-      if (parsed && typeof parsed === "object") {
-        const label = parsed.name || parsed.status || value;
-        return `${label}${parsed.date ? ` · ${formatDate(parsed.date)}` : ""}`;
-      }
+      return JSON.parse(value);
     } catch {
-      /* plain text */
+      return value;
     }
-    return value;
+  }
+
+  function friendly(value: string | null | undefined, field: string) {
+    const parsed = valueFromAudit(value);
+    if (!parsed) return "—";
+    if (field === "status") {
+      if (typeof parsed === "string") return statusLabel(parsed);
+      if (typeof parsed === "object" && "status" in parsed) {
+        const status = statusLabel(String(parsed.status));
+        return `${status}${parsed.date ? ` · ${formatDate(String(parsed.date))}` : ""}`;
+      }
+    }
+    if (field === "activity" && typeof parsed === "object") {
+      const name = String(parsed.name || parsed.title || "Activity");
+      return `${name}${parsed.date ? ` · ${formatDate(String(parsed.date))}` : ""}`;
+    }
+    if (field === "signed_copy" && typeof parsed === "object") {
+      const path = String(parsed.path || parsed.filename || "MOU signed copy");
+      return path.split("/").pop() || "MOU signed copy";
+    }
+    return typeof parsed === "string" ? parsed : JSON.stringify(parsed);
+  }
+
+  function eventTitle(event: AuditEvent) {
+    if (event.field_name === "status") return "Status changed";
+    if (event.field_name === "activity") return "Activity logged";
+    if (event.field_name === "signed_copy")
+      return event.old_value ? "Signed copy replaced" : "Signed copy uploaded";
+    return `${fieldLabels[event.field_name] || event.field_name} ${
+      event.old_value ? "updated" : "added"
+    }`;
+  }
+
+  function eventIcon(event: AuditEvent) {
+    if (event.field_name === "status") return <Activity size={14} />;
+    if (event.field_name === "activity") return <CalendarDays size={14} />;
+    if (event.field_name === "signed_copy") return <FileText size={14} />;
+    return <Edit3 size={14} />;
   }
   return (
     <div className="drawer-body">
@@ -1471,24 +1700,40 @@ function AuditLog({ events }: { events: AuditEvent[] }) {
         <div className="audit-list">
           {events.map((event) => (
             <div className="audit-item" key={event.id}>
-              <div className="audit-marker">
-                <Edit3 size={13} />
+              <div className={`audit-marker audit-${event.field_name}`}>
+                {eventIcon(event)}
               </div>
               <div className="audit-content">
-                <div>
-                  <strong>
-                    {fieldLabels[event.field_name] || event.field_name}
-                  </strong>
-                  <small>
-                    {displayDateTime(event.changed_at)} ·{" "}
-                    {apiUser(event.changed_by_user).name}
-                  </small>
+                <div className="audit-heading">
+                  <div>
+                    <strong>{eventTitle(event)}</strong>
+                    <small>
+                      Changed by {apiUser(event.changed_by_user).name}
+                    </small>
+                  </div>
+                  <time>{displayDateTime(event.changed_at)}</time>
                 </div>
-                <p>
-                  <span>{friendly(event.old_value)}</span>
-                  <ArrowUpRight size={13} />
-                  <span>{friendly(event.new_value)}</span>
-                </p>
+                <div
+                  className={`audit-change ${
+                    event.old_value ? "has-previous" : "is-created"
+                  }`}
+                >
+                  {event.old_value && (
+                    <div className="audit-value audit-old">
+                      <span>Previous</span>
+                      <strong>
+                        {friendly(event.old_value, event.field_name)}
+                      </strong>
+                    </div>
+                  )}
+                  {event.old_value && <ArrowUpRight size={13} />}
+                  <div className="audit-value audit-new">
+                    <span>{event.old_value ? "New" : "Added"}</span>
+                    <strong>
+                      {friendly(event.new_value, event.field_name)}
+                    </strong>
+                  </div>
+                </div>
               </div>
             </div>
           ))}
@@ -1585,6 +1830,7 @@ function CompanyModal({
               activityNotes.trim() ||
               "Primary activity logged from the MOU workspace.",
             date: formatDate(activityDate),
+            isoDate: activityDate,
             user: activeUser,
           },
         ]
@@ -1592,6 +1838,7 @@ function CompanyModal({
     const next: Company = {
       id: company?.id || Date.now(),
       mouId: company?.mouId,
+      createdAt: company?.createdAt || new Date().toISOString(),
       name: name.trim(),
       city: city.trim(),
       logo: initials(name),
@@ -1635,7 +1882,8 @@ function CompanyModal({
             <h2>{company ? "Edit MOU record" : "Add a company"}</h2>
             <p>
               All company, MOU, contact and internal SPOC fields are required.
-              The initial status is locked after creation.
+              The initial status and effective start date are locked after
+              creation.
             </p>
           </div>
           <button className="close-button" onClick={onClose}>
@@ -1707,15 +1955,28 @@ function CompanyModal({
                   </small>
                 )}
               </label>
-              <label>
-                <span>Effective / signed date *</span>
-                <input
-                  required
-                  type="date"
-                  value={effectiveDate}
-                  onChange={(event) => setEffectiveDate(event.target.value)}
-                />
-              </label>
+              {company ? (
+                <label>
+                  <span>Effective / signed date (locked)</span>
+                  <div className="read-only-date">
+                    {formatDate(effectiveDate)}
+                  </div>
+                  <small>
+                    This creation record is permanently preserved and cannot be
+                    edited.
+                  </small>
+                </label>
+              ) : (
+                <label>
+                  <span>Effective / signed date *</span>
+                  <input
+                    required
+                    type="date"
+                    value={effectiveDate}
+                    onChange={(event) => setEffectiveDate(event.target.value)}
+                  />
+                </label>
+              )}
               <label>
                 <span>Expiry date *</span>
                 <input
@@ -1932,56 +2193,6 @@ function AdminAccessPage({
               </span>
             </div>
           ))}
-        </div>
-      </div>
-    </section>
-  );
-}
-function SettingsPage({ syncState }: { syncState: string }) {
-  return (
-    <section className="activity-page">
-      <div className="section-header">
-        <div>
-          <h2>Settings</h2>
-          <p>Connection and security settings for this workspace.</p>
-        </div>
-        <div className="section-meta">
-          <span className="live-dot"></span>{" "}
-          {syncState === "error" ? "Needs attention" : "Connected"}
-        </div>
-      </div>
-      <div className="settings-grid">
-        <div className="setting-card">
-          <ShieldCheck size={18} />
-          <div>
-            <strong>Authentication</strong>
-            <span>FastAPI-issued JWT sessions</span>
-          </div>
-          <em>Active</em>
-        </div>
-        <div className="setting-card">
-          <FileText size={18} />
-          <div>
-            <strong>Data storage</strong>
-            <span>Supabase PostgreSQL</span>
-          </div>
-          <em>Connected</em>
-        </div>
-        <div className="setting-card">
-          <UploadCloud size={18} />
-          <div>
-            <strong>Document storage</strong>
-            <span>Private MOU PDF bucket</span>
-          </div>
-          <em>Private</em>
-        </div>
-        <div className="setting-card">
-          <Activity size={18} />
-          <div>
-            <strong>Audit tracking</strong>
-            <span>Status and activity changes include admin and timestamp</span>
-          </div>
-          <em>Enabled</em>
         </div>
       </div>
     </section>

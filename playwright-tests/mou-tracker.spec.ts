@@ -19,16 +19,43 @@ test("live JWT workflow: login, create MOU, change status, and log activity", as
   await expect(
     page.getByRole("heading", { name: "MOU portfolio" }),
   ).toBeVisible();
-  await expect(page.getByText("Synced just now")).toBeVisible();
+  await expect(page.getByText("Synced just now")).toBeVisible({
+    timeout: 15_000,
+  });
+  for (const status of [
+    "Proposed",
+    "Under discussion",
+    "Drafted",
+    "Legal review",
+    "Approval pending",
+    "Approved",
+    "Signed by client",
+    "Signed by university",
+    "Signed by both",
+    "Active",
+    "Expected renewal",
+    "Expired",
+    "Renewal",
+    "Closed",
+    "Terminated",
+  ]) {
+    await expect(
+      page.getByRole("button", { name: `Show ${status} MOUs` }),
+    ).toBeVisible();
+  }
+  await expect(page.getByText("Expires in 30 days")).toBeVisible();
+  await page.getByRole("button", { name: "Show Proposed MOUs" }).click();
+  await expect(
+    page.getByRole("heading", { name: "All companies" }),
+  ).toBeVisible();
+  await expect(page.locator(".filter-row select")).toHaveValue("Proposed");
 
   await page.getByRole("button", { name: "Admin access" }).click();
   await expect(
     page.getByRole("heading", { name: "Admin access" }),
   ).toBeVisible();
   await expect(page.getByText("Workspace admin").first()).toBeVisible();
-  await page.getByRole("button", { name: "Settings" }).click();
-  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
-  await expect(page.getByText("Supabase PostgreSQL")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Settings" })).toHaveCount(0);
   await page.getByRole("button", { name: /Companies/ }).click();
 
   await page.getByRole("button", { name: "Add company" }).click();
@@ -51,13 +78,11 @@ test("live JWT workflow: login, create MOU, change status, and log activity", as
   await page.getByLabel("Client contact name *").fill("Test Client Contact");
   await page.getByLabel("Client email ID *").fill("client@example.com");
   await page.getByLabel("Client phone number *").fill("+91 91111 11111");
-  await page
-    .locator('input[type="file"]')
-    .setInputFiles({
-      name: "playwright-mou.pdf",
-      mimeType: "application/pdf",
-      buffer: Buffer.from("%PDF-1.4\n% playwright smoke test\n"),
-    });
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "playwright-mou.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from("%PDF-1.4\n% playwright smoke test\n"),
+  });
   await page.getByRole("button", { name: "Create company" }).click();
 
   await expect(page.getByRole("heading", { name: companyName })).toBeVisible({
@@ -66,10 +91,17 @@ test("live JWT workflow: login, create MOU, change status, and log activity", as
   await page.getByRole("button", { name: /Status history/ }).click();
   await expect(page.getByRole("button", { name: "Proposed" })).toBeVisible();
   await page.getByRole("button", { name: "Proposed" }).click();
-  await page.getByRole("combobox").selectOption({ label: "Active" });
+  await page.locator(".drawer-status select").selectOption({ label: "Active" });
   await page.getByLabel("Status date *").fill("2026-09-05");
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect(page.getByText("Active").last()).toBeVisible();
+
+  await page.locator(".drawer-status .status").click();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(
+    page.getByText("Choose a different status before saving."),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
 
   await page.getByRole("button", { name: /Activities 0/ }).click();
   await page
@@ -83,9 +115,14 @@ test("live JWT workflow: login, create MOU, change status, and log activity", as
   await expect(page.getByText("Playwright smoke activity")).toBeVisible();
 
   await page.getByRole("button", { name: /Edit all details/ }).click();
+  await expect(
+    page.getByText("Effective / signed date (locked)", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByLabel("Effective / signed date *")).toHaveCount(0);
   await page.getByLabel("City *").fill("Mysuru");
   await page.getByRole("button", { name: "Save changes" }).click();
   await page.getByRole("button", { name: /Audit log/ }).click();
-  await expect(page.getByText("City").last()).toBeVisible();
+  await expect(page.getByText("City updated").last()).toBeVisible();
+  await expect(page.getByText("Status changed").last()).toBeVisible();
   await expect(page.getByText("Abhinav Teja").last()).toBeVisible();
 });
