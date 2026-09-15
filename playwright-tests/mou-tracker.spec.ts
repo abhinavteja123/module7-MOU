@@ -88,6 +88,24 @@ test("live JWT workflow: login, create MOU, change status, and log activity", as
   await expect(page.getByRole("heading", { name: companyName })).toBeVisible({
     timeout: 10000,
   });
+  await page.getByRole("button", { name: "Document actions" }).click();
+  await expect(page.getByRole("menuitem", { name: "Preview" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Download" })).toBeVisible();
+  await expect(page.getByText("Add document", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("Replace document", { exact: true }),
+  ).toBeVisible();
+  await page.getByRole("menuitem", { name: "Preview" }).click();
+  await expect(page.getByRole("heading", { name: "PDF preview" })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Enter fullscreen" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Close PDF preview" }).click();
+  await page.getByRole("button", { name: "Document actions" }).click();
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("menuitem", { name: "Download" }).click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toBe("playwright-mou.pdf");
   await page.getByRole("button", { name: /Status history/ }).click();
   await expect(page.getByRole("button", { name: "Proposed" })).toBeVisible();
   await page.getByRole("button", { name: "Proposed" }).click();

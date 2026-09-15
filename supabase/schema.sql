@@ -26,8 +26,14 @@ create table if not exists public.users (
   email text not null unique,
   display_name text not null,
   password_hash text not null,
+  role text not null default 'user' check (role in ('user', 'super_admin')),
+  access_level text not null default 'view' check (access_level in ('view', 'edit')),
+  is_active boolean not null default true,
   created_at timestamptz not null default now()
 );
+
+create index if not exists users_active_display_name_idx
+  on public.users(is_active, display_name);
 
 create table if not exists public.company (
   id uuid primary key default gen_random_uuid(),

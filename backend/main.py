@@ -111,10 +111,29 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class AccessLevel(str, Enum):
+    view = "view"
+    edit = "edit"
+
+
 class UserCreate(BaseModel):
     email: str = Field(min_length=3, max_length=320)
     display_name: str = Field(min_length=1, max_length=120)
     password: str = Field(min_length=8, max_length=200)
+    access_level: AccessLevel = AccessLevel.view
+
+
+class UserAccessUpdate(BaseModel):
+    access_level: AccessLevel
+
+
+class OwnPasswordChange(BaseModel):
+    current_password: str = Field(min_length=1, max_length=200)
+    new_password: str = Field(min_length=8, max_length=200)
+
+
+class AdminPasswordReset(BaseModel):
+    new_password: str = Field(min_length=8, max_length=200)
 
 
 app = FastAPI(title="MOU Tracker API", version="1.0.0")
@@ -181,7 +200,7 @@ def password_matches(password: str, stored: str) -> bool:
 
 def public_profile(profile: Optional[dict]) -> Optional[dict]:
     if not profile: return None
-    return {key: profile.get(key) for key in ("id", "email", "display_name", "created_at")}
+    return {key: profile.get(key) for key in ("id", "email", "display_name", "role", "access_level", "is_active", "created_at")}
 
 
 def audit_value(value: Any) -> Optional[str]:
@@ -251,7 +270,22 @@ def current_user(authorization: Optional[str] = Header(default=None), db: Client
         raise HTTPException(503, "The database is temporarily unavailable. Please retry.") from exc
     if not profiles:
         raise HTTPException(401, "Invalid or expired app JWT")
-    return profiles[0]
+    profile = profiles[0]
+    if not profile.get("is_active", True):
+        raise HTTPException(401, "This tracker account has been removed")
+    return profile
+
+
+def require_edit_user(user: dict = Depends(current_user)) -> dict:
+    if user.get("role") != "super_admin" and user.get("access_level", "view") != "edit":
+        raise HTTPException(403, "Edit access is required for this action")
+    return user
+
+
+def require_super_admin(user: dict = Depends(current_user)) -> dict:
+    if user.get("role") != "super_admin":
+        raise HTTPException(403, "Super-admin access is required for user management")
+    return user
 
 
 def one(db: Client, table: str, **filters: str) -> dict:
@@ -296,27 +330,69 @@ def login(payload: LoginRequest, db: Client = Depends(require_supabase)) -> dict
     except Exception as exc:
         logging.exception("Could not load login profile")
         raise HTTPException(503, "The database is temporarily unavailable. Please retry.") from exc
-    if not profiles or not password_matches(payload.password, profiles[0].get("password_hash", "")):
+    if not profiles or not profiles[0].get("is_active", True) or not password_matches(payload.password, profiles[0].get("password_hash", "")):
         raise HTTPException(401, "Invalid email or password")
     profile = profiles[0]
     now = datetime.now(timezone.utc)
     claims = {"sub": profile["id"], "email": profile["email"], "iat": now, "exp": now.timestamp() + (jwt_expire_minutes * 60)}
     token = jwt.encode(claims, jwt_secret, algorithm="HS256")
-    return {"access_token": token, "token_type": "bearer", "user": {"id": profile["id"], "email": profile["email"], "display_name": profile["display_name"]}}
+    return {"access_token": token, "token_type": "bearer", "user": public_profile(profile)}
 
 
 @app.get("/users")
-def list_users(db: Client = Depends(require_supabase), _: dict = Depends(current_user)) -> dict:
-    return {"data": db.table("users").select("id,email,display_name,created_at").order("display_name").execute().data or []}
+def list_users(db: Client = Depends(require_supabase), _: dict = Depends(require_super_admin)) -> dict:
+    return {"data": db.table("users").select("id,email,display_name,role,access_level,is_active,created_at").order("display_name").execute().data or []}
 
 
 @app.post("/users", status_code=201)
-def create_user(payload: UserCreate, db: Client = Depends(require_supabase), _: dict = Depends(current_user)) -> dict:
+def create_user(payload: UserCreate, db: Client = Depends(require_supabase), user: dict = Depends(require_super_admin)) -> dict:
     email = payload.email.strip().lower()
     if db.table("users").select("id").eq("email", email).execute().data:
         raise HTTPException(409, "A user with this email already exists")
-    created = db.table("users").insert({"id": str(uuid4()), "email": email, "display_name": payload.display_name.strip(), "password_hash": password_hash(payload.password)}).execute().data[0]
+    created = db.table("users").insert({"id": str(uuid4()), "email": email, "display_name": payload.display_name.strip(), "password_hash": password_hash(payload.password), "role": "user", "access_level": payload.access_level.value, "is_active": True}).execute().data[0]
+    audit_change(db, "user", created["id"], "account_created", None, {"email": email, "access_level": payload.access_level.value}, user["id"])
     return {"data": public_profile(created)}
+
+
+@app.patch("/users/{user_id}/access")
+def update_user_access(user_id: str, payload: UserAccessUpdate, db: Client = Depends(require_supabase), user: dict = Depends(require_super_admin)) -> dict:
+    target = one(db, "users", id=user_id)
+    if target.get("role") == "super_admin":
+        raise HTTPException(409, "The super admin always has full access and cannot be changed here")
+    updated = db.table("users").update({"access_level": payload.access_level.value}).eq("id", user_id).execute().data[0]
+    audit_change(db, "user", user_id, "access_level", target.get("access_level"), payload.access_level.value, user["id"])
+    return {"data": public_profile(updated)}
+
+
+@app.delete("/users/{user_id}")
+def remove_user(user_id: str, db: Client = Depends(require_supabase), user: dict = Depends(require_super_admin)) -> dict:
+    target = one(db, "users", id=user_id)
+    if target["id"] == user["id"] or target.get("role") == "super_admin":
+        raise HTTPException(409, "The super-admin account cannot be removed")
+    if not target.get("is_active", True):
+        raise HTTPException(409, "This user has already been removed")
+    updated = db.table("users").update({"is_active": False}).eq("id", user_id).execute().data[0]
+    audit_change(db, "user", user_id, "access_removed", "active", "removed", user["id"])
+    return {"data": public_profile(updated)}
+
+
+@app.put("/users/{user_id}/password")
+def reset_user_password(user_id: str, payload: AdminPasswordReset, db: Client = Depends(require_supabase), user: dict = Depends(require_super_admin)) -> dict:
+    target = one(db, "users", id=user_id)
+    if not target.get("is_active", True):
+        raise HTTPException(409, "A removed account cannot receive a new password")
+    db.table("users").update({"password_hash": password_hash(payload.new_password)}).eq("id", user_id).execute()
+    audit_change(db, "user", user_id, "password_reset", None, "super-admin reset", user["id"])
+    return {"ok": True}
+
+
+@app.put("/auth/password")
+def change_own_password(payload: OwnPasswordChange, db: Client = Depends(require_supabase), user: dict = Depends(current_user)) -> dict:
+    if not password_matches(payload.current_password, user.get("password_hash", "")):
+        raise HTTPException(401, "Your current password is incorrect")
+    db.table("users").update({"password_hash": password_hash(payload.new_password)}).eq("id", user["id"]).execute()
+    audit_change(db, "user", user["id"], "password_changed", None, "self-service", user["id"])
+    return {"ok": True}
 
 
 @app.get("/companies")
@@ -338,7 +414,7 @@ def get_company(company_id: str, db: Client = Depends(require_supabase), _: dict
 
 
 @app.post("/companies", status_code=201)
-def create_company(payload: CompanyCreate, db: Client = Depends(require_supabase), user: dict = Depends(current_user)) -> dict:
+def create_company(payload: CompanyCreate, db: Client = Depends(require_supabase), user: dict = Depends(require_edit_user)) -> dict:
     validate_company_dates(payload.effective_date, payload.expiring_date)
     if payload.activity_name and not payload.activity_date:
         raise HTTPException(422, "Activity date is required when a primary activity is entered")
@@ -394,7 +470,7 @@ def create_company(payload: CompanyCreate, db: Client = Depends(require_supabase
 
 
 @app.patch("/companies/{company_id}")
-def update_company(company_id: str, payload: CompanyUpdate, db: Client = Depends(require_supabase), user: dict = Depends(current_user)) -> dict:
+def update_company(company_id: str, payload: CompanyUpdate, db: Client = Depends(require_supabase), user: dict = Depends(require_edit_user)) -> dict:
     company = one(db, "company", id=company_id)
     mou = one(db, "mou", company_id=company_id)
     effective_date = date.fromisoformat(str(mou["effective_date"]))
@@ -431,7 +507,7 @@ def update_company(company_id: str, payload: CompanyUpdate, db: Client = Depends
 
 
 @app.post("/mous/{mou_id}/status")
-def change_status(mou_id: str, payload: StatusChange, db: Client = Depends(require_supabase), user: dict = Depends(current_user)) -> dict:
+def change_status(mou_id: str, payload: StatusChange, db: Client = Depends(require_supabase), user: dict = Depends(require_edit_user)) -> dict:
     mou = one(db, "mou", id=mou_id)
     if mou.get("current_status") == payload.status.value:
         raise HTTPException(409, "This status is already current. Choose a different status before saving.")
@@ -482,7 +558,7 @@ def change_status(mou_id: str, payload: StatusChange, db: Client = Depends(requi
 
 
 @app.patch("/status-history/{history_id}")
-def correct_status(history_id: str, payload: StatusCorrection, db: Client = Depends(require_supabase), user: dict = Depends(current_user)) -> dict:
+def correct_status(history_id: str, payload: StatusCorrection, db: Client = Depends(require_supabase), user: dict = Depends(require_edit_user)) -> dict:
     history = one(db, "status_history", id=history_id)
     if history["is_initial"]:
         raise HTTPException(409, "The initial status is permanently locked and cannot be edited")
@@ -518,7 +594,7 @@ def correct_status(history_id: str, payload: StatusCorrection, db: Client = Depe
 
 
 @app.post("/companies/{company_id}/activities", status_code=201)
-def add_activity(company_id: str, payload: ActivityCreate, db: Client = Depends(require_supabase), user: dict = Depends(current_user)) -> dict:
+def add_activity(company_id: str, payload: ActivityCreate, db: Client = Depends(require_supabase), user: dict = Depends(require_edit_user)) -> dict:
     one(db, "company", id=company_id)
     activity = db.table("activity_log").insert({"company_id": company_id, "activity_name": payload.activity_name, "activity_notes": payload.activity_notes, "description": payload.activity_name, "activity_date": payload.activity_date.isoformat() if payload.activity_date else None, "created_by": user["id"]}).execute().data[0]
     audit_change(db, "company", company_id, "activity", None, {"id": activity["id"], "name": payload.activity_name, "notes": payload.activity_notes, "date": payload.activity_date}, user["id"])
@@ -526,7 +602,7 @@ def add_activity(company_id: str, payload: ActivityCreate, db: Client = Depends(
 
 
 @app.post("/mous/{mou_id}/pdf", status_code=201)
-async def upload_pdf(mou_id: str, file: UploadFile = File(...), db: Client = Depends(require_supabase), user: dict = Depends(current_user)) -> dict:
+async def upload_pdf(mou_id: str, file: UploadFile = File(...), db: Client = Depends(require_supabase), user: dict = Depends(require_edit_user)) -> dict:
     if file.content_type != "application/pdf":
         raise HTTPException(415, "Only PDF files are accepted")
     mou = one(db, "mou", id=mou_id)

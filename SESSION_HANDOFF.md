@@ -1,10 +1,12 @@
 # MOU Tracker — Session Handoff
 
-Updated: 2026-09-08
+Updated: 2026-09-15
 
 ## Current state
 
 The repository contains a React + Vite frontend and a FastAPI backend for the MOU Tracker. Supabase is used for PostgreSQL data and private PDF Storage. Authentication is handled by FastAPI-issued JWTs; Supabase Auth is not used.
+
+User access is now role-based. A database-designated `super_admin` manages tracker login accounts through the in-app User management page: it creates standard users with either `view` or `edit` access, can reset any active user's password, and can remove access. Removal sets `public.users.is_active = false` rather than deleting the row, preserving all existing MOU and audit attribution. Standard users can change their own password from the profile menu. View access is enforced server-side for all tracker writes; it is not merely a hidden UI control. Password hashes and plaintext passwords are never returned or stored in audit entries.
 
 The original Supabase schema has been applied successfully to project `onwdniirceuxnixctrhp`. The compatibility migration in `supabase/migrations/20260903_admin_mou_fields.sql` must be run once for existing databases before creating records with the new fields.
 
@@ -32,7 +34,7 @@ The initial MOU status is inserted into `status_history` with `is_initial = true
 
 Status duplicate protection is enforced by the API (a current status cannot be saved again, and the same status/date cannot be recorded twice) and by the drawer (Save becomes disabled while the request is in flight). The API now uses a conditional MOU update as an optimistic-concurrency guard, so concurrent requests yield one successful update and one HTTP 409 conflict rather than duplicate history. The drawer now keeps its existing form open and shows a clear error if a user attempts a duplicate status. Seven redundant consecutive status-history rows and six matching no-op audit records were removed from the live project on 2026-09-07; the initial and every meaningful transition remain intact.
 
-Company creation requires the complete company, MOU, effective/expiry, internal SPOC, client contact, and signed PDF fields. The effective/signed date is a creation record: the edit form locks it and the update API rejects it. All other company and MOU details remain editable. The PDF is base64-encoded by the frontend, validated as a PDF by FastAPI, and uploaded to private Supabase Storage within the creation workflow. If Storage or a database write fails, the new company and any uploaded object are removed. The initial status is disabled during edits. Every create, editable field change, status transition/correction, activity, and PDF replacement appends an `audit_log` row containing entity, field, old value, new value, acting admin, and timestamp. The record drawer exposes these rows under Audit log.
+Company creation requires the complete company, MOU, effective/expiry, internal SPOC, client contact, and signed PDF fields. The effective/signed date is a creation record: the edit form locks it and the update API rejects it. All other company and MOU details remain editable. The PDF is base64-encoded by the frontend, validated as a PDF by FastAPI, and uploaded to private Supabase Storage within the creation workflow. If Storage or a database write fails, the new company and any uploaded object are removed. The initial status is disabled during edits. Every create, editable field change, status transition/correction, activity, and PDF replacement appends an `audit_log` row containing entity, field, old value, new value, acting admin, and timestamp. The record drawer exposes these rows under Audit log. The stored PDF card now has a three-dot actions menu with Preview, Download, Add document, and Replace document. Preview opens an in-window `react-pdf` modal using a signed private-Storage URL, with a browser fullscreen toggle and clean exit handling; Download fetches the same signed URL and saves the file locally. Records without a PDF retain a direct Add document upload state.
 
 The overview calculates an `Expires in 30 days` KPI from stored MOU dates (non-terminal MOUs whose expiry date is 0–30 days away). Monthly activity compliance deliberately appears in the individual MOU Activities tab instead of the KPI strip: a warning dot and a clear `No activity in <previous calendar month>` notice appear only when a non-terminal MOU has no activity in the last completed calendar month. Newly created companies are not flagged for a month that ended before they existed.
 
@@ -50,6 +52,7 @@ The FastAPI service creates a request-scoped Supabase client instead of sharing 
 - `supabase/migrations/20260903_status_dates.sql` — status effective-date column and baseline backfill
 - `supabase/migrations/20260907_prevent_duplicate_status_events.sql` — database-level unique backstop for non-initial MOU status/date events
 - `supabase/migrations/20260908_lifecycle_statuses.sql` — adds `expected_renewal` and `closed` values to the status enum
+- `supabase/migrations/20260915_user_access_management.sql` — adds super-admin, view/edit, and safe account-deactivation fields
 - `.env.example` — required environment variable names
 - `README.md` — local setup instructions
 
@@ -95,6 +98,10 @@ The backend loads `.env` using `python-dotenv`.
 - `POST /auth/login`
 - `GET /users`
 - `POST /users`
+- `PATCH /users/{user_id}/access`
+- `DELETE /users/{user_id}` (deactivates access, preserves history)
+- `PUT /users/{user_id}/password` (super admin password reset)
+- `PUT /auth/password` (signed-in user changes own password)
 - `GET /companies`
 - `GET /companies/{company_id}`
 - `POST /companies`
@@ -121,6 +128,8 @@ The backend loads `.env` using `python-dotenv`.
 - Atomic status check passed: two simultaneous status updates returned one HTTP 200 and one HTTP 409, with one new history row
 - PDF-validation check passed: invalid PDF data returns HTTP 422 without creating a company record
 - Abhinav Teja login tested and valid JWT subject verified
+- PDF document actions verified in Playwright: three-dot menu, Preview/Download/Add document/Replace document options, and same-window preview modal
+- PDF preview fullscreen control verified in the live build and Playwright-visible as `Enter fullscreen`; the browser download event and suggested filename were also verified
 
 ## Supabase MCP
 
@@ -128,7 +137,7 @@ The configured Supabase MCP account is unavailable in the current session, and t
 
 ## Known follow-up items
 
-- Add a dedicated user-management screen if users should be created without calling `POST /users` directly.
+- Apply `20260915_user_access_management.sql`, then promote the intended existing account with the commented bootstrap statement at its end before using User management in the live deployment.
 - Add UI controls for correcting individual non-initial status-history entries.
 - Add frontend error toasts and loading states around live API mutations.
 - Rotate the service-role key if it has been shared outside the local environment.

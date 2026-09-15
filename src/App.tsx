@@ -1,6 +1,8 @@
 import {
   ChangeEvent,
   FormEvent,
+  type Dispatch,
+  type SetStateAction,
   useEffect,
   useMemo,
   useRef,
@@ -20,30 +22,50 @@ import {
   FileText,
   Filter,
   LayoutDashboard,
+  KeyRound,
+  Maximize2,
   Menu,
+  Minimize2,
   MoreHorizontal,
   Paperclip,
   Plus,
   Search,
   ShieldCheck,
   Sparkles,
+  Trash2,
   UploadCloud,
+  UserPlus,
   Users,
   X,
 } from "lucide-react";
 import {
   addLiveActivity,
   changeLiveStatus,
+  changeOwnPassword,
   clearAuth,
   createLiveCompany,
+  createLiveUser,
   getAuthUser,
   getLiveCompanies,
+  getLivePdfUrl,
   getLiveUsers,
   isLiveMode,
   login,
+  removeLiveUser,
+  resetLiveUserPassword,
+  updateLiveUserAccess,
   updateLiveCompany,
   uploadLivePdf,
 } from "./lib/api";
+import { Document, Page, pdfjs } from "react-pdf";
+import type { AuthUser, ManagedUser } from "./lib/api";
+import "react-pdf/dist/Page/AnnotationLayer.css";
+import "react-pdf/dist/Page/TextLayer.css";
+
+pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+  "pdfjs-dist/build/pdf.worker.min.mjs",
+  import.meta.url,
+).toString();
 
 type Status =
   | "Proposed"
@@ -67,6 +89,13 @@ type User = {
   color: string;
   email: string;
   phone?: string;
+};
+type TrackerAccess = "view" | "edit";
+type ManagedTrackerUser = User & {
+  id: string;
+  role: "user" | "super_admin";
+  accessLevel: TrackerAccess;
+  isActive: boolean;
 };
 type StatusEvent = { status: Status; date: string; user: User };
 type ActivityItem = {
@@ -421,6 +450,26 @@ function apiUser(value: any, fallback = users[0]): User {
     }
   );
 }
+
+function managedApiUser(value: ManagedUser): ManagedTrackerUser {
+  return {
+    ...apiUser(value),
+    id: value.id,
+    role: value.role === "super_admin" ? "super_admin" : "user",
+    accessLevel: value.access_level === "edit" ? "edit" : "view",
+    isActive: value.is_active !== false,
+  };
+}
+
+function demoManagedUsers(): ManagedTrackerUser[] {
+  return users.map((user, index) => ({
+    ...user,
+    id: `demo-user-${index + 1}`,
+    role: index === 0 ? "super_admin" : "user",
+    accessLevel: "edit",
+    isActive: true,
+  }));
+}
 function fromApiCompany(record: any): Company {
   const mou = record.mou || {};
   const contact = record.contact_details?.[0] || {};
@@ -498,7 +547,9 @@ function App() {
   const [companies, setCompanies] = useState<Company[]>(
     isLiveMode ? [] : seedCompanies,
   );
-  const [adminUsers, setAdminUsers] = useState<User[]>(isLiveMode ? [] : users);
+  const [adminUsers, setAdminUsers] = useState<ManagedTrackerUser[]>(
+    isLiveMode ? [] : demoManagedUsers(),
+  );
   const [selectedId, setSelectedId] = useState<number | string | null>(null);
   const [view, setView] = useState<
     "overview" | "companies" | "activities" | "admin"
@@ -511,25 +562,26 @@ function App() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingCompany, setEditingCompany] = useState<Company | null>(null);
   const [authUser, setAuthUser] = useState(getAuthUser());
+  const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [syncState, setSyncState] = useState<
     "demo" | "synced" | "syncing" | "error"
   >(isLiveMode ? "syncing" : "demo");
   const activeUser = authUser
     ? apiUser({ email: authUser.email, display_name: authUser.display_name })
     : users[0];
+  const isSuperAdmin = !isLiveMode || authUser?.role === "super_admin";
+  const canEdit = !isLiveMode || authUser?.role === "super_admin" || authUser?.access_level === "edit";
   useEffect(() => {
     if (!isLiveMode || !authUser) return;
     let cancelled = false;
     const load = async (showInitialLoading = false) => {
       if (showInitialLoading) setSyncState("syncing");
       try {
-        const [companyResult, userResult] = await Promise.all([
-          getLiveCompanies(),
-          getLiveUsers(),
-        ]);
+        const companyResult = await getLiveCompanies();
+        const userResult = isSuperAdmin ? await getLiveUsers() : null;
         if (!cancelled) {
           setCompanies(companyResult.data.map(fromApiCompany));
-          setAdminUsers(userResult.data.map((item: any) => apiUser(item)));
+          if (userResult) setAdminUsers(userResult.data.map(managedApiUser));
           setSyncState("synced");
         }
       } catch (error) {
@@ -543,7 +595,7 @@ function App() {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [authUser]);
+  }, [authUser, isSuperAdmin]);
   const selectedCompany =
     companies.find((company) => company.id === selectedId) ?? null;
   const filteredCompanies = useMemo(
@@ -577,6 +629,7 @@ function App() {
   if (isLiveMode && !authUser)
     return <AuthScreen onAuthenticated={setAuthUser} />;
   async function saveCompany(company: Company) {
+    if (!canEdit) return;
     if (isLiveMode) {
       try {
         if (!company.mouId && !company.documentFile)
@@ -685,15 +738,17 @@ function App() {
             <Activity size={17} /> Activities
           </button>
         </nav>
-        <nav className="nav-section nav-bottom">
-          <div className="nav-caption">Manage</div>
-          <button
-            className={`nav-item ${view === "admin" ? "active" : ""}`}
-            onClick={() => setView("admin")}
-          >
-            <ShieldCheck size={17} /> Admin access
-          </button>
-        </nav>
+        {isSuperAdmin && (
+          <nav className="nav-section nav-bottom">
+            <div className="nav-caption">Manage</div>
+            <button
+              className={`nav-item ${view === "admin" ? "active" : ""}`}
+              onClick={() => setView("admin")}
+            >
+              <ShieldCheck size={17} /> User management
+            </button>
+          </nav>
+        )}
         <div className="sidebar-footer">
           <div className="help-card">
             <Sparkles size={18} />
@@ -707,7 +762,7 @@ function App() {
             <Avatar user={activeUser} />
             <div>
               <strong>{activeUser.name}</strong>
-              <span>Workspace admin</span>
+              <span>{isSuperAdmin ? "Super admin" : canEdit ? "Editor" : "Viewer"}</span>
             </div>
             <ShieldCheck size={17} />
           </div>
@@ -728,7 +783,7 @@ function App() {
                   ? "Companies"
                   : view === "activities"
                     ? "Activities"
-                    : "Admin access"}
+                    : "User management"}
             </strong>
           </div>
           <div className="top-actions">
@@ -751,6 +806,12 @@ function App() {
               >
                 Sign out
               </button>
+              <button
+                className="logout-button"
+                onClick={() => setShowPasswordModal(true)}
+              >
+                Change password
+              </button>
             </div>
           </div>
         </header>
@@ -760,11 +821,12 @@ function App() {
               <div className="eyebrow">Workspace administration</div>
               <h1>Good morning, {activeUser.name.split(" ")[0]}</h1>
               <p>
-                Manage MOU records, contacts, internal SPOCs, statuses,
-                documents and activities.
+                {canEdit
+                  ? "Manage MOU records, contacts, internal SPOCs, statuses, documents and activities."
+                  : "Review MOU records, contacts, statuses, documents and activities."}
               </p>
             </div>
-            {view !== "admin" && (
+            {view !== "admin" && canEdit && (
               <button
                 className="primary-button"
                 onClick={() => setShowAddModal(true)}
@@ -774,7 +836,11 @@ function App() {
             )}
           </div>
           {view === "admin" ? (
-            <AdminAccessPage adminUsers={adminUsers} activeUser={activeUser} />
+            <AdminAccessPage
+              adminUsers={adminUsers}
+              activeUser={authUser}
+              onUsersChange={setAdminUsers}
+            />
           ) : view === "activities" ? (
             <ActivityFeed companies={companies} />
           ) : (
@@ -1051,6 +1117,7 @@ function App() {
         <CompanyDrawer
           company={selectedCompany}
           activeUser={activeUser}
+          canEdit={canEdit}
           onClose={() => setSelectedId(null)}
           onEdit={() => setEditingCompany(selectedCompany)}
           onSave={(company) =>
@@ -1071,6 +1138,9 @@ function App() {
           onSave={saveCompany}
         />
       )}
+      {showPasswordModal && (
+        <PasswordChangeModal onClose={() => setShowPasswordModal(false)} />
+      )}
     </div>
   );
 }
@@ -1078,12 +1148,14 @@ function App() {
 function CompanyDrawer({
   company,
   activeUser,
+  canEdit,
   onClose,
   onEdit,
   onSave,
 }: {
   company: Company;
   activeUser: User;
+  canEdit: boolean;
   onClose: () => void;
   onEdit: () => void;
   onSave: (company: Company) => void;
@@ -1100,8 +1172,20 @@ function CompanyDrawer({
   const [activityTitle, setActivityTitle] = useState("");
   const [activityNote, setActivityNote] = useState("");
   const [activityDate, setActivityDate] = useState("");
+  const [documentMenuOpen, setDocumentMenuOpen] = useState(false);
+  const [documentError, setDocumentError] = useState("");
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewObjectUrl, setPreviewObjectUrl] = useState<string | null>(null);
+  const documentInputId = `mou-document-${String(company.id).replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+
+  useEffect(() => {
+    return () => {
+      if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl);
+    };
+  }, [previewObjectUrl]);
 
   function startStatusEdit() {
+    if (!canEdit) return;
     setPendingStatus(company.status);
     setStatusDate(todayInput());
     setStatusError("");
@@ -1109,6 +1193,7 @@ function CompanyDrawer({
   }
 
   async function saveStatus() {
+    if (!canEdit) return;
     if (statusSaveInFlight.current) return;
     if (!statusDate) {
       setStatusError("A status date is required.");
@@ -1162,6 +1247,7 @@ function CompanyDrawer({
 
   async function addActivity(event: FormEvent) {
     event.preventDefault();
+    if (!canEdit) return;
     if (!activityTitle.trim() || !activityDate) return;
     try {
       if (isLiveMode && typeof company.id === "string")
@@ -1195,19 +1281,93 @@ function CompanyDrawer({
   }
 
   async function attachPdf(event: ChangeEvent<HTMLInputElement>) {
+    if (!canEdit) return;
     const file = event.target.files?.[0];
     if (!file || file.type !== "application/pdf") return;
+    setDocumentError("");
+    setDocumentMenuOpen(false);
     try {
       if (isLiveMode && company.mouId) await uploadLivePdf(company.mouId, file);
       onSave({
         ...company,
         document: file.name,
         documentSize: `${(file.size / 1024 / 1024).toFixed(1)} MB`,
+        documentFile: file,
         lastUpdated: "Just now",
         lastUpdatedBy: activeUser,
       });
     } catch (error) {
       console.error(error);
+      setDocumentError(
+        error instanceof Error ? error.message : "Unable to upload the PDF.",
+      );
+    } finally {
+      event.target.value = "";
+    }
+  }
+
+  function closePdfPreview() {
+    setPreviewUrl(null);
+    setPreviewObjectUrl(null);
+  }
+
+  async function openPdfPreview() {
+    setDocumentMenuOpen(false);
+    setDocumentError("");
+    closePdfPreview();
+    try {
+      if (isLiveMode && company.mouId) {
+        const response = await getLivePdfUrl(company.mouId);
+        setPreviewUrl(response.data.url);
+        return;
+      }
+      if (company.documentFile) {
+        const localUrl = URL.createObjectURL(company.documentFile);
+        setPreviewObjectUrl(localUrl);
+        setPreviewUrl(localUrl);
+        return;
+      }
+      throw new Error("The stored PDF is not available for preview yet.");
+    } catch (error) {
+      console.error(error);
+      setDocumentError(
+        error instanceof Error ? error.message : "Unable to open the PDF.",
+      );
+    }
+  }
+
+  async function downloadPdf() {
+    setDocumentMenuOpen(false);
+    setDocumentError("");
+    let localUrl = "";
+    try {
+      let url = "";
+      if (isLiveMode && company.mouId) {
+        url = (await getLivePdfUrl(company.mouId)).data.url;
+      } else if (company.documentFile) {
+        localUrl = URL.createObjectURL(company.documentFile);
+        url = localUrl;
+      } else {
+        throw new Error("The stored PDF is not available for download yet.");
+      }
+
+      const response = await fetch(url);
+      if (!response.ok) throw new Error("Unable to download the PDF.");
+      const blobUrl = URL.createObjectURL(await response.blob());
+      const anchor = window.document.createElement("a");
+      anchor.href = blobUrl;
+      anchor.download = company.document || "mou-signed-copy.pdf";
+      window.document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+    } catch (error) {
+      console.error(error);
+      setDocumentError(
+        error instanceof Error ? error.message : "Unable to download the PDF.",
+      );
+    } finally {
+      if (localUrl) URL.revokeObjectURL(localUrl);
     }
   }
 
@@ -1218,21 +1378,11 @@ function CompanyDrawer({
           <button className="close-button" onClick={onClose}>
             <X size={19} />
           </button>
-          <div className="drawer-actions">
-            <label className="secondary-button">
-              <Paperclip size={15} />{" "}
-              {company.document ? "Replace PDF" : "Attach PDF"}
-              <input
-                type="file"
-                accept="application/pdf,.pdf"
-                style={{ display: "none" }}
-                onChange={attachPdf}
-              />
-            </label>
+          {canEdit && <div className="drawer-actions">
             <button className="secondary-button" onClick={onEdit}>
               <Edit3 size={15} /> Edit all details
             </button>
-          </div>
+          </div>}
         </div>
         <div className="drawer-company">
           <div
@@ -1303,7 +1453,7 @@ function CompanyDrawer({
                   </button>
                 </div>
               </div>
-            ) : (
+            ) : canEdit ? (
               <button
                 className={statusClass(company.status)}
                 onClick={startStatusEdit}
@@ -1312,7 +1462,7 @@ function CompanyDrawer({
                 {company.status}
                 <ChevronDown size={14} />
               </button>
-            )}
+            ) : <span className={statusClass(company.status)}><i></i>{company.status}</span>}
           </div>
           <div className="updated-by">
             <span>Last updated {company.lastUpdated}</span>
@@ -1364,9 +1514,9 @@ function CompanyDrawer({
                   initial status is permanently locked.
                 </span>
               </div>
-              <button className="secondary-button" onClick={onEdit}>
+              {canEdit && <button className="secondary-button" onClick={onEdit}>
                 <Edit3 size={15} /> Edit details
-              </button>
+              </button>}
             </div>
             <div className="drawer-grid">
               <InfoItem label="City" value={company.city || "—"} />
@@ -1413,17 +1563,15 @@ function CompanyDrawer({
             <div className="subsection">
               <div className="subsection-title">
                 <span>MOU signed copy</span>
-                <label className="text-button">
-                  <UploadCloud size={14} />{" "}
-                  {company.document ? "Replace" : "Upload"}
-                  <input
-                    type="file"
-                    accept="application/pdf,.pdf"
-                    style={{ display: "none" }}
-                    onChange={attachPdf}
-                  />
-                </label>
+                <span className="document-hint">PDF · Max 10 MB</span>
               </div>
+              {canEdit && <input
+                  id={documentInputId}
+                  className="document-file-input"
+                  type="file"
+                  accept="application/pdf,.pdf"
+                  onChange={attachPdf}
+                />}
               {company.document ? (
                 <div className="document-card">
                   <div className="pdf-icon">PDF</div>
@@ -1434,15 +1582,62 @@ function CompanyDrawer({
                       {company.lastUpdatedBy.name}
                     </span>
                   </div>
-                  <MoreHorizontal size={16} />
+                  <div className="document-actions-wrap">
+                    <button
+                      type="button"
+                      className="document-menu-trigger"
+                      aria-label="Document actions"
+                      aria-haspopup="menu"
+                      aria-expanded={documentMenuOpen}
+                      onClick={() => setDocumentMenuOpen((open) => !open)}
+                    >
+                      <MoreHorizontal size={16} />
+                    </button>
+                    {documentMenuOpen && (
+                      <div className="document-menu" role="menu">
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={() => void openPdfPreview()}
+                        >
+                          Preview
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={() => void downloadPdf()}
+                        >
+                          Download
+                        </button>
+                        {canEdit && <label
+                          className="document-menu-item"
+                          htmlFor={documentInputId}
+                          role="menuitem"
+                        >
+                          Add document
+                        </label>}
+                        {canEdit && <label
+                          className="document-menu-item"
+                          htmlFor={documentInputId}
+                          role="menuitem"
+                        >
+                          Replace document
+                        </label>}
+                      </div>
+                    )}
+                  </div>
                 </div>
-              ) : (
-                <div className="upload-empty">
+              ) : canEdit ? (
+                <label className="upload-empty" htmlFor={documentInputId}>
                   <UploadCloud size={20} />
                   <span>Upload the signed MOU PDF</span>
+                  <b>Add document</b>
                   <small>PDF only · Max 10 MB</small>
-                </div>
+                </label>
+              ) : (
+                <div className="upload-empty"><FileText size={20} /><span>No signed MOU PDF has been added.</span></div>
               )}
+              {documentError && <p className="document-error">{documentError}</p>}
             </div>
             <div className="subsection">
               <div className="subsection-title">
@@ -1530,7 +1725,7 @@ function CompanyDrawer({
                 </div>
               </div>
             )}
-            <form className="activity-form" onSubmit={addActivity}>
+            {canEdit && <form className="activity-form" onSubmit={addActivity}>
               <div className="form-title">
                 <Activity size={17} />
                 <span>Log primary activity</span>
@@ -1569,7 +1764,7 @@ function CompanyDrawer({
                   <Plus size={15} /> Add activity
                 </button>
               </div>
-            </form>
+            </form>}
             <div className="activity-list">
               {company.activities.map((activity) => (
                 <div className="activity-item" key={activity.id}>
@@ -1590,6 +1785,118 @@ function CompanyDrawer({
         )}
         {tab === "audit" && <AuditLog events={company.auditLog || []} />}
       </aside>
+      {previewUrl && (
+        <PdfPreviewModal
+          url={previewUrl}
+          title={company.document || "MOU signed copy"}
+          onClose={closePdfPreview}
+        />
+      )}
+    </div>
+  );
+}
+
+function PdfPreviewModal({
+  url,
+  title,
+  onClose,
+}: {
+  url: string;
+  title: string;
+  onClose: () => void;
+}) {
+  const [numPages, setNumPages] = useState(0);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const modalRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    function handleFullscreenChange() {
+      setIsFullscreen(document.fullscreenElement === modalRef.current);
+    }
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    return () =>
+      document.removeEventListener("fullscreenchange", handleFullscreenChange);
+  }, []);
+
+  async function toggleFullscreen() {
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else {
+        await modalRef.current?.requestFullscreen();
+      }
+    } catch (error) {
+      console.error("Fullscreen mode is unavailable.", error);
+    }
+  }
+
+  async function closePreview() {
+    if (document.fullscreenElement === modalRef.current) {
+      await document.exitFullscreen();
+    }
+    onClose();
+  }
+
+  return (
+    <div className="pdf-preview-backdrop" onClick={() => void closePreview()}>
+      <section
+        className="pdf-preview-modal"
+        ref={modalRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="pdf-preview-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="pdf-preview-header">
+          <div>
+            <h2 id="pdf-preview-title">PDF preview</h2>
+            <span>{title}</span>
+          </div>
+          <div className="pdf-preview-header-actions">
+            <button
+              type="button"
+              className="pdf-preview-icon-button"
+              aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+              title={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+              onClick={() => void toggleFullscreen()}
+            >
+              {isFullscreen ? <Minimize2 size={17} /> : <Maximize2 size={17} />}
+            </button>
+            <button
+              type="button"
+              className="close-button"
+              aria-label="Close PDF preview"
+              onClick={() => void closePreview()}
+            >
+              <X size={19} />
+            </button>
+          </div>
+        </div>
+        <div className="pdf-preview-body">
+          <Document
+            file={url}
+            onLoadSuccess={({ numPages: loadedPages }) =>
+              setNumPages(loadedPages)
+            }
+            loading={<div className="pdf-preview-state">Loading preview…</div>}
+            error={
+              <div className="pdf-preview-state">
+                This PDF could not be rendered in the preview.
+              </div>
+            }
+          >
+            {Array.from({ length: numPages }, (_, index) => (
+              <Page
+                key={`pdf-page-${index + 1}`}
+                pageNumber={index + 1}
+                width={620}
+                renderAnnotationLayer
+                renderTextLayer
+              />
+            ))}
+          </Document>
+        </div>
+      </section>
     </div>
   );
 }
@@ -2155,16 +2462,83 @@ function CompanyModal({
 function AdminAccessPage({
   adminUsers,
   activeUser,
+  onUsersChange,
 }: {
-  adminUsers: User[];
-  activeUser: User;
+  adminUsers: ManagedTrackerUser[];
+  activeUser: AuthUser | null;
+  onUsersChange: Dispatch<SetStateAction<ManagedTrackerUser[]>>;
 }) {
+  const [displayName, setDisplayName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [accessLevel, setAccessLevel] = useState<TrackerAccess>("view");
+  const [resetUser, setResetUser] = useState<ManagedTrackerUser | null>(null);
+  const [resetPassword, setResetPassword] = useState("");
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function addUser(event: FormEvent) {
+    event.preventDefault();
+    setSaving(true); setError(""); setMessage("");
+    try {
+      if (isLiveMode) {
+        const result = await createLiveUser({ email, display_name: displayName, password, access_level: accessLevel });
+        onUsersChange((current) => [...current, managedApiUser(result.data)].sort((a, b) => a.name.localeCompare(b.name)));
+      } else {
+        onUsersChange((current) => [...current, {
+          ...apiUser({ email, display_name: displayName }), id: `demo-user-${Date.now()}`, role: "user" as const, accessLevel, isActive: true,
+        }].sort((a, b) => a.name.localeCompare(b.name)));
+      }
+      setDisplayName(""); setEmail(""); setPassword(""); setAccessLevel("view");
+      setMessage("User added. Share the temporary password securely.");
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Unable to add user.");
+    } finally { setSaving(false); }
+  }
+
+  async function changeAccess(target: ManagedTrackerUser, nextAccess: TrackerAccess) {
+    setError(""); setMessage("");
+    try {
+      if (isLiveMode) await updateLiveUserAccess(target.id, nextAccess);
+      onUsersChange((current) => current.map((user) => user.id === target.id ? { ...user, accessLevel: nextAccess } : user));
+      setMessage(`${target.name} now has ${nextAccess} access.`);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Unable to update access.");
+    }
+  }
+
+  async function removeUser(target: ManagedTrackerUser) {
+    if (!window.confirm(`Remove ${target.name}'s access to the tracker? Their audit history will be kept.`)) return;
+    setError(""); setMessage("");
+    try {
+      if (isLiveMode) await removeLiveUser(target.id);
+      onUsersChange((current) => current.filter((user) => user.id !== target.id));
+      setMessage(`${target.name}'s tracker access was removed.`);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Unable to remove this user.");
+    }
+  }
+
+  async function submitPasswordReset(event: FormEvent) {
+    event.preventDefault();
+    if (!resetUser) return;
+    setSaving(true); setError(""); setMessage("");
+    try {
+      if (isLiveMode) await resetLiveUserPassword(resetUser.id, resetPassword);
+      setResetUser(null); setResetPassword("");
+      setMessage(`Password changed for ${resetUser.name}. Share it securely.`);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Unable to reset the password.");
+    } finally { setSaving(false); }
+  }
+
   return (
     <section className="activity-page">
       <div className="section-header">
         <div>
-          <h2>Admin access</h2>
-          <p>Login accounts with permission to manage every MOU record.</p>
+          <h2>User management</h2>
+          <p>Add tracker users, choose their access, or remove access safely.</p>
         </div>
         <div className="section-meta">
           <span className="live-dot"></span> Database-backed
@@ -2174,29 +2548,85 @@ function AdminAccessPage({
         <div className="history-intro">
           <ShieldCheck size={17} />
           <span>
-            Internal SPOCs and client contacts are not users. They are
-            maintained inside each MOU record.
+            Viewers can inspect records and documents. Editors can also create,
+            update and log tracker activity. Removed accounts keep audit history.
           </span>
         </div>
+        <form className="user-management-form" onSubmit={addUser}>
+          <strong><UserPlus size={15} /> Add tracker user</strong>
+          <div className="user-form-grid">
+            <label>Full name<input required value={displayName} onChange={(event) => setDisplayName(event.target.value)} /></label>
+            <label>Email<input required type="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label>
+            <label>Temporary password<input required minLength={8} type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
+            <label>Access<select value={accessLevel} onChange={(event) => setAccessLevel(event.target.value as TrackerAccess)}><option value="view">View only</option><option value="edit">Edit tracker</option></select></label>
+          </div>
+          <button className="primary-button compact" disabled={saving}><UserPlus size={15} /> Add user</button>
+        </form>
+        {message && <p className="user-management-message">{message}</p>}
+        {error && <p className="status-error">{error}</p>}
         <div className="admin-user-list">
           {adminUsers.map((user) => (
-            <div className="admin-user-row" key={user.email}>
+            <div className="admin-user-row managed-user-row" key={user.id}>
               <Avatar user={user} />
               <div>
                 <strong>{user.name}</strong>
                 <small>{user.email}</small>
               </div>
               <span className="admin-role">
-                {user.email === activeUser.email
-                  ? "You · Admin"
-                  : "Workspace admin"}
+                {user.role === "super_admin" ? "Super admin" : user.accessLevel === "edit" ? "Editor" : "Viewer"}
               </span>
+              {user.role !== "super_admin" && (
+                <div className="user-row-actions">
+                  <select aria-label={`${user.name} access`} value={user.accessLevel} onChange={(event) => void changeAccess(user, event.target.value as TrackerAccess)}>
+                    <option value="view">View</option><option value="edit">Edit</option>
+                  </select>
+                  <button type="button" className="secondary-button" onClick={() => setResetUser(user)}><KeyRound size={14} /> Password</button>
+                  <button type="button" className="danger-button" onClick={() => void removeUser(user)} aria-label={`Remove ${user.name}`}><Trash2 size={14} /> Remove</button>
+                </div>
+              )}
             </div>
           ))}
         </div>
       </div>
+      {resetUser && (
+        <div className="modal-backdrop" onClick={() => setResetUser(null)}>
+          <form className="modal password-modal" onSubmit={submitPasswordReset} onClick={(event) => event.stopPropagation()}>
+            <button type="button" className="close-button" onClick={() => setResetUser(null)}><X size={18} /></button>
+            <div className="eyebrow">Super-admin action</div><h2>Change password</h2>
+            <p>Set a new password for {resetUser.name}. The previous password stops working immediately.</p>
+            <label>New password<input autoFocus required minLength={8} type="password" value={resetPassword} onChange={(event) => setResetPassword(event.target.value)} /></label>
+            <div className="modal-footer"><button type="button" className="secondary-button" onClick={() => setResetUser(null)}>Cancel</button><button className="primary-button" disabled={saving}>Save password</button></div>
+          </form>
+        </div>
+      )}
     </section>
   );
+}
+
+function PasswordChangeModal({ onClose }: { onClose: () => void }) {
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [complete, setComplete] = useState(false);
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (newPassword !== confirmation) { setError("The new password and confirmation do not match."); return; }
+    setSaving(true); setError("");
+    try {
+      if (isLiveMode) await changeOwnPassword(currentPassword, newPassword);
+      setComplete(true);
+    } catch (requestError) { setError(requestError instanceof Error ? requestError.message : "Unable to change your password."); }
+    finally { setSaving(false); }
+  }
+  return <div className="modal-backdrop" onClick={onClose}><form className="modal password-modal" onSubmit={submit} onClick={(event) => event.stopPropagation()}>
+    <button type="button" className="close-button" onClick={onClose}><X size={18} /></button>
+    <div className="eyebrow">Account security</div><h2>Change my password</h2>
+    <p>Use at least eight characters. Your new password takes effect immediately.</p>
+    {complete ? <p className="user-management-message">Password updated successfully.</p> : <><label>Current password<input autoFocus required type="password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} /></label><label>New password<input required minLength={8} type="password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} /></label><label>Confirm new password<input required minLength={8} type="password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></label>{error && <p className="status-error">{error}</p>}</>}
+    <div className="modal-footer"><button type="button" className="secondary-button" onClick={onClose}>{complete ? "Close" : "Cancel"}</button>{!complete && <button className="primary-button" disabled={saving}>Save password</button>}</div>
+  </form></div>;
 }
 function ActivityFeed({ companies }: { companies: Company[] }) {
   const allActivities = companies

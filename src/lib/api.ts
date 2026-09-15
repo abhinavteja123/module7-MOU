@@ -1,4 +1,12 @@
-export type AuthUser = { id: string; email: string; display_name: string }
+export type AuthUser = {
+  id: string
+  email: string
+  display_name: string
+  role?: 'user' | 'super_admin'
+  access_level?: 'view' | 'edit'
+}
+
+export type ManagedUser = AuthUser & { is_active: boolean; created_at?: string }
 
 const apiBase = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 const tokenKey = 'mou_tracker_access_token'
@@ -35,7 +43,12 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export async function getLiveCompanies() { return request<{ data: any[] }>('/companies') }
-export async function getLiveUsers() { return request<{ data: any[] }>('/users') }
+export async function getLiveUsers() { return request<{ data: ManagedUser[] }>('/users') }
+export async function createLiveUser(payload: { email: string; display_name: string; password: string; access_level: 'view' | 'edit' }) { return request<{ data: ManagedUser }>('/users', { method: 'POST', body: JSON.stringify(payload) }) }
+export async function updateLiveUserAccess(userId: string, access_level: 'view' | 'edit') { return request<{ data: ManagedUser }>(`/users/${userId}/access`, { method: 'PATCH', body: JSON.stringify({ access_level }) }) }
+export async function removeLiveUser(userId: string) { return request<{ data: ManagedUser }>(`/users/${userId}`, { method: 'DELETE' }) }
+export async function resetLiveUserPassword(userId: string, new_password: string) { return request<{ ok: boolean }>(`/users/${userId}/password`, { method: 'PUT', body: JSON.stringify({ new_password }) }) }
+export async function changeOwnPassword(current_password: string, new_password: string) { return request<{ ok: boolean }>('/auth/password', { method: 'PUT', body: JSON.stringify({ current_password, new_password }) }) }
 export async function createLiveCompany(payload: Record<string, unknown>) { return request<{ data: any }>('/companies', { method: 'POST', body: JSON.stringify(payload) }) }
 export async function updateLiveCompany(companyId: string, payload: Record<string, unknown>) { return request<{ data: any }>(`/companies/${companyId}`, { method: 'PATCH', body: JSON.stringify(payload) }) }
 export async function changeLiveStatus(mouId: string, payload: Record<string, unknown>) { return request<{ data: any }>(`/mous/${mouId}/status`, { method: 'POST', body: JSON.stringify(payload) }) }
