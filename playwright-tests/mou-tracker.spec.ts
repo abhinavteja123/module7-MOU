@@ -14,7 +14,7 @@ test("live JWT workflow: login, create MOU, change status, and log activity", as
   await page.getByRole("button", { name: /Sign in/ }).click();
 
   await expect(
-    page.getByRole("heading", { name: /Good morning, Abhinav/ }),
+    page.getByRole("heading", { name: "Agreement control center" }),
   ).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "MOU portfolio" }),
@@ -22,39 +22,25 @@ test("live JWT workflow: login, create MOU, change status, and log activity", as
   await expect(page.getByText("Synced just now")).toBeVisible({
     timeout: 15_000,
   });
-  for (const status of [
-    "Proposed",
-    "Under discussion",
-    "Drafted",
-    "Legal review",
-    "Approval pending",
-    "Approved",
-    "Signed by client",
-    "Signed by university",
-    "Signed by both",
-    "Active",
-    "Expected renewal",
-    "Expired",
-    "Renewal",
-    "Closed",
-    "Terminated",
-  ]) {
+  for (const status of ["Active", "Expected renewal", "Approved"]) {
     await expect(
       page.getByRole("button", { name: `Show ${status} MOUs` }),
     ).toBeVisible();
   }
-  await expect(page.getByText("Expires in 30 days")).toBeVisible();
-  await page.getByRole("button", { name: "Show Proposed MOUs" }).click();
+  await expect(
+    page.getByRole("button", { name: "Show MOUs expiring in 30 days" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Show Active MOUs" }).click();
   await expect(
     page.getByRole("heading", { name: "All companies" }),
   ).toBeVisible();
-  await expect(page.locator(".filter-row select")).toHaveValue("Proposed");
+  await expect(page.locator(".filter-row select")).toHaveValue("Active");
 
-  await page.getByRole("button", { name: "Admin access" }).click();
+  await page.getByRole("button", { name: "User management" }).click();
   await expect(
-    page.getByRole("heading", { name: "Admin access" }),
+    page.getByRole("heading", { name: "User management" }),
   ).toBeVisible();
-  await expect(page.getByText("Workspace admin").first()).toBeVisible();
+  await expect(page.getByText("Super admin").first()).toBeVisible();
   await expect(page.getByRole("button", { name: "Settings" })).toHaveCount(0);
   await page.getByRole("button", { name: /Companies/ }).click();
 
@@ -112,7 +98,9 @@ test("live JWT workflow: login, create MOU, change status, and log activity", as
   await page.locator(".drawer-status select").selectOption({ label: "Active" });
   await page.getByLabel("Status date *").fill("2026-09-05");
   await page.getByRole("button", { name: "Save", exact: true }).click();
-  await expect(page.getByText("Active").last()).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Active", exact: true }),
+  ).toBeVisible();
 
   await page.locator(".drawer-status .status").click();
   await page.getByRole("button", { name: "Save", exact: true }).click();

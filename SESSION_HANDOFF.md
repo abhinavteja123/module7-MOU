@@ -1,12 +1,12 @@
 # MOU Tracker — Session Handoff
 
-Updated: 2026-09-15
+Updated: 2026-09-16
 
 ## Current state
 
 The repository contains a React + Vite frontend and a FastAPI backend for the MOU Tracker. Supabase is used for PostgreSQL data and private PDF Storage. Authentication is handled by FastAPI-issued JWTs; Supabase Auth is not used.
 
-User access is now role-based. A database-designated `super_admin` manages tracker login accounts through the in-app User management page: it creates standard users with either `view` or `edit` access, can reset any active user's password, and can remove access. Removal sets `public.users.is_active = false` rather than deleting the row, preserving all existing MOU and audit attribution. Standard users can change their own password from the profile menu. View access is enforced server-side for all tracker writes; it is not merely a hidden UI control. Password hashes and plaintext passwords are never returned or stored in audit entries.
+User access is now role-based. A database-designated `super_admin` manages tracker login accounts through the in-app User management page: it creates standard users with either `view` or `edit` access, can reset any active user's password, and can remove access. Removal sets `public.users.is_active = false` rather than deleting the row, preserving all existing MOU and audit attribution. Standard users can change their own password from the profile menu. View access is enforced server-side for all tracker writes; it is not merely a hidden UI control. Password hashes and plaintext passwords are never returned or stored in audit entries. The live `users` role/access schema was confirmed on 2026-09-15 and the Abhinav Teja workspace account was designated as the initial super admin.
 
 The original Supabase schema has been applied successfully to project `onwdniirceuxnixctrhp`. The compatibility migration in `supabase/migrations/20260903_admin_mou_fields.sql` must be run once for existing databases before creating records with the new fields.
 
@@ -38,6 +38,12 @@ Company creation requires the complete company, MOU, effective/expiry, internal 
 
 The overview calculates an `Expires in 30 days` KPI from stored MOU dates (non-terminal MOUs whose expiry date is 0–30 days away). Monthly activity compliance deliberately appears in the individual MOU Activities tab instead of the KPI strip: a warning dot and a clear `No activity in <previous calendar month>` notice appear only when a non-terminal MOU has no activity in the last completed calendar month. Newly created companies are not flagged for a month that ended before they existed.
 
+The overview status area is intentionally limited to four clickable KPI cards: `Expires in 30 days`, `Active`, `Expected renewal`, and `Approved`. Each opens the company table with its matching filter; the expiry KPI uses the same stored-date rule as its count.
+
+Editor access is an `edit` access level for a standard `user` account; it does not change the sign-in mechanism. User creation now normalizes the login email, requires temporary-password confirmation, and confirms the exact email that the new user must use to sign in. A live 2026-09-16 verification passed the complete editor account create/login/remove flow.
+
+All live user-attributed activity, status-history, audit-log, and last-update displays show a local date and time. Portfolio last-updated values, agreement-header updates, status history, activity rows, and audit records use a common highlighted timestamp treatment. Status history retains the user-selected effective date and time separately from the recorded timestamp; activities retain both their selected activity date/time and the exact logged timestamp. Activity rows show the selected date/time on the left and a highlighted right-aligned logged timestamp badge. Audit entries present the responsible user, a highlighted right-aligned recorded date/time badge, a clear before-to-after comparison, and activity notes where available. Apply `20260916000001_status_times.sql` and `20260916000002_activity_times.sql` before deploying the time-picker changes.
+
 The FastAPI service creates a request-scoped Supabase client instead of sharing a synchronous HTTP client between concurrent browser requests. Transport failures return HTTP 503 with a retry-safe message; they are not mislabeled as invalid JWTs or passwords.
 
 ## Main files
@@ -53,6 +59,8 @@ The FastAPI service creates a request-scoped Supabase client instead of sharing 
 - `supabase/migrations/20260907_prevent_duplicate_status_events.sql` — database-level unique backstop for non-initial MOU status/date events
 - `supabase/migrations/20260908_lifecycle_statuses.sql` — adds `expected_renewal` and `closed` values to the status enum
 - `supabase/migrations/20260915_user_access_management.sql` — adds super-admin, view/edit, and safe account-deactivation fields
+- `supabase/migrations/20260916000001_status_times.sql` — adds user-selected effective time to status history and updates duplicate protection
+- `supabase/migrations/20260916000002_activity_times.sql` — adds user-selected effective time to MOU activities
 - `.env.example` — required environment variable names
 - `README.md` — local setup instructions
 
@@ -130,6 +138,9 @@ The backend loads `.env` using `python-dotenv`.
 - Abhinav Teja login tested and valid JWT subject verified
 - PDF document actions verified in Playwright: three-dot menu, Preview/Download/Add document/Replace document options, and same-window preview modal
 - PDF preview fullscreen control verified in the live build and Playwright-visible as `Enter fullscreen`; the browser download event and suggested filename were also verified
+- Live role/access E2E verified: super-admin listing and creation, viewer read access plus write denial, edit elevation, self-service password change, super-admin password reset, and removal/session invalidation. The disposable E2E account was left deactivated so the remove-access path remains auditable.
+- Live Playwright workflow passed after the UI refresh: login, User management visibility, create MOU/PDF, document preview/download, status transition, duplicate-status prevention, activity, immutable effective date, and audit-log attribution.
+- Refreshed desktop UI was visually verified; the status matrix uses readable two-column groups and includes reduced-motion support.
 
 ## Supabase MCP
 
@@ -137,7 +148,8 @@ The configured Supabase MCP account is unavailable in the current session, and t
 
 ## Known follow-up items
 
-- Apply `20260915_user_access_management.sql`, then promote the intended existing account with the commented bootstrap statement at its end before using User management in the live deployment.
+- Keep the initial super-admin account active; create additional tracker accounts only through User management so access changes remain audited.
+- The live Playwright verification retained three `Playwright Smoke ...` MOU records. They are valid tracker records created by end-to-end testing; remove them only if test-data cleanup is explicitly approved.
 - Add UI controls for correcting individual non-initial status-history entries.
 - Add frontend error toasts and loading states around live API mutations.
 - Rotate the service-role key if it has been shared outside the local environment.

@@ -3,7 +3,7 @@
 The frontend talks to this service; this service owns multi-table writes,
 status-history rules, auth attribution, and private PDF storage.
 """
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 from enum import Enum
 import base64
 import hashlib
@@ -70,6 +70,7 @@ class CompanyCreate(BaseModel):
     activity_name: Optional[str] = None
     activity_notes: Optional[str] = None
     activity_date: Optional[date] = None
+    activity_time: Optional[time] = None
 
 
 class CompanyUpdate(BaseModel):
@@ -91,12 +92,14 @@ class CompanyUpdate(BaseModel):
 class StatusChange(BaseModel):
     status: MOUStatus
     status_date: date
+    status_time: time
     notes: Optional[str] = None
 
 
 class StatusCorrection(BaseModel):
     status: MOUStatus
     status_date: Optional[date] = None
+    status_time: Optional[time] = None
     notes: Optional[str] = None
 
 
@@ -104,6 +107,7 @@ class ActivityCreate(BaseModel):
     activity_name: str = Field(min_length=1, max_length=5000)
     activity_notes: Optional[str] = Field(default=None, max_length=5000)
     activity_date: date
+    activity_time: time
 
 
 class LoginRequest(BaseModel):
@@ -341,7 +345,7 @@ def login(payload: LoginRequest, db: Client = Depends(require_supabase)) -> dict
 
 @app.get("/users")
 def list_users(db: Client = Depends(require_supabase), _: dict = Depends(require_super_admin)) -> dict:
-    return {"data": db.table("users").select("id,email,display_name,role,access_level,is_active,created_at").order("display_name").execute().data or []}
+    return {"data": db.table("users").select("id,email,display_name,role,access_level,is_active,created_at").eq("is_active", True).order("display_name").execute().data or []}
 
 
 @app.post("/users", status_code=201)
@@ -416,10 +420,10 @@ def get_company(company_id: str, db: Client = Depends(require_supabase), _: dict
 @app.post("/companies", status_code=201)
 def create_company(payload: CompanyCreate, db: Client = Depends(require_supabase), user: dict = Depends(require_edit_user)) -> dict:
     validate_company_dates(payload.effective_date, payload.expiring_date)
-    if payload.activity_name and not payload.activity_date:
-        raise HTTPException(422, "Activity date is required when a primary activity is entered")
-    if payload.activity_date and not payload.activity_name:
-        raise HTTPException(422, "A primary activity is required when an activity date is entered")
+    if payload.activity_name and (payload.activity_date is None or payload.activity_time is None):
+        raise HTTPException(422, "Activity date and time are required when a primary activity is entered")
+    if (payload.activity_date is not None or payload.activity_time is not None) and not payload.activity_name:
+        raise HTTPException(422, "A primary activity is required when an activity date or time is entered")
     document = decode_pdf(payload.document_base64, payload.document_content_type)
     filename = safe_pdf_filename(payload.document_filename)
     company: Optional[dict] = None
@@ -435,13 +439,13 @@ def create_company(payload: CompanyCreate, db: Client = Depends(require_supabase
         company = db.table("company").insert({"company_name": payload.company_name, "city": payload.city, "created_by": user["id"]}).execute().data[0]
         mou_data["company_id"] = company["id"]
         mou = db.table("mou").insert(mou_data).execute().data[0]
-        db.table("status_history").insert({"mou_id": mou["id"], "status": payload.initial_status.value, "status_date": payload.effective_date.isoformat(), "changed_by": user["id"], "is_initial": True}).execute()
+        db.table("status_history").insert({"mou_id": mou["id"], "status": payload.initial_status.value, "status_date": payload.effective_date.isoformat(), "status_time": datetime.now().time().replace(microsecond=0).isoformat(), "changed_by": user["id"], "is_initial": True}).execute()
         contact = db.table("contact_details").insert({"mou_id": mou["id"], "contact_name": payload.contact_name, "email": payload.contact_email, "phone": payload.contact_phone}).execute().data[0]
         document_path = f"{company['id']}/{mou['id']}/{filename}"
         db.storage.from_("mou-pdfs").upload(document_path, document, {"content-type": "application/pdf", "upsert": "false"})
         mou = db.table("mou").update({"pdf_url": document_path, "updated_by": user["id"]}).eq("id", mou["id"]).execute().data[0]
         if payload.activity_name:
-            db.table("activity_log").insert({"company_id": company["id"], "activity_name": payload.activity_name, "activity_notes": payload.activity_notes, "description": payload.activity_name, "activity_date": payload.activity_date.isoformat() if payload.activity_date else None, "created_by": user["id"]}).execute()
+            db.table("activity_log").insert({"company_id": company["id"], "activity_name": payload.activity_name, "activity_notes": payload.activity_notes, "description": payload.activity_name, "activity_date": payload.activity_date.isoformat() if payload.activity_date else None, "activity_time": payload.activity_time.isoformat() if payload.activity_time else None, "created_by": user["id"]}).execute()
         for field_name, value in (("company_name", payload.company_name), ("city", payload.city)):
             audit_change(db, "company", company["id"], field_name, None, value, user["id"])
         for field_name, value in (
@@ -455,7 +459,7 @@ def create_company(payload: CompanyCreate, db: Client = Depends(require_supabase
             audit_change(db, "contact", contact["id"], field_name, None, value, user["id"])
         audit_change(db, "mou", mou["id"], "signed_copy", None, document_path, user["id"])
         if payload.activity_name:
-            audit_change(db, "company", company["id"], "activity", None, {"name": payload.activity_name, "notes": payload.activity_notes, "date": payload.activity_date}, user["id"])
+            audit_change(db, "company", company["id"], "activity", None, {"name": payload.activity_name, "notes": payload.activity_notes, "date": payload.activity_date, "time": payload.activity_time}, user["id"])
     except Exception as exc:
         if document_path:
             try:
@@ -518,13 +522,14 @@ def change_status(mou_id: str, payload: StatusChange, db: Client = Depends(requi
         .eq("mou_id", mou_id)
         .eq("status", payload.status.value)
         .eq("status_date", payload.status_date.isoformat())
+        .eq("status_time", payload.status_time.isoformat())
         .limit(1)
         .execute()
         .data
         or []
     )
     if same_status_on_date:
-        raise HTTPException(409, "This status has already been recorded for the selected date.")
+        raise HTTPException(409, "This status has already been recorded for the selected date and time.")
 
     # Conditional update makes the current status an optimistic concurrency
     # guard: only one simultaneous request can move the MOU out of its current
@@ -540,13 +545,13 @@ def change_status(mou_id: str, payload: StatusChange, db: Client = Depends(requi
     if not result.data:
         raise HTTPException(409, "This MOU was updated by another admin. Refresh and try again.")
     try:
-        db.table("status_history").insert({"mou_id": mou_id, "status": payload.status.value, "status_date": payload.status_date.isoformat(), "changed_by": user["id"], "notes": payload.notes, "is_initial": False}).execute()
+        db.table("status_history").insert({"mou_id": mou_id, "status": payload.status.value, "status_date": payload.status_date.isoformat(), "status_time": payload.status_time.isoformat(), "changed_by": user["id"], "notes": payload.notes, "is_initial": False}).execute()
     except Exception as exc:
         # Keep the current state consistent with history if its insert fails.
         db.table("mou").update({"current_status": mou["current_status"], "updated_by": user["id"]}).eq("id", mou_id).eq("current_status", payload.status.value).execute()
         raise HTTPException(503, "Could not record the status change. Please retry.") from exc
     try:
-        audit_change(db, "mou", mou_id, "status", mou.get("current_status"), {"status": payload.status.value, "date": payload.status_date}, user["id"])
+        audit_change(db, "mou", mou_id, "status", mou.get("current_status"), {"status": payload.status.value, "date": payload.status_date, "time": payload.status_time}, user["id"])
         if payload.notes:
             audit_change(db, "mou", mou_id, "status_notes", None, payload.notes, user["id"])
     except Exception:
@@ -563,7 +568,8 @@ def correct_status(history_id: str, payload: StatusCorrection, db: Client = Depe
     if history["is_initial"]:
         raise HTTPException(409, "The initial status is permanently locked and cannot be edited")
     status_date = payload.status_date or date.fromisoformat(history["status_date"])
-    status_changed = payload.status.value != history["status"] or status_date.isoformat() != history["status_date"]
+    status_time = payload.status_time or time.fromisoformat(str(history["status_time"]))
+    status_changed = payload.status.value != history["status"] or status_date.isoformat() != history["status_date"] or status_time.isoformat() != history["status_time"]
     if status_changed:
         duplicate = (
             db.table("status_history")
@@ -571,6 +577,7 @@ def correct_status(history_id: str, payload: StatusCorrection, db: Client = Depe
             .eq("mou_id", history["mou_id"])
             .eq("status", payload.status.value)
             .eq("status_date", status_date.isoformat())
+            .eq("status_time", status_time.isoformat())
             .neq("id", history_id)
             .limit(1)
             .execute()
@@ -578,16 +585,18 @@ def correct_status(history_id: str, payload: StatusCorrection, db: Client = Depe
             or []
         )
         if duplicate:
-            raise HTTPException(409, "This status has already been recorded for the selected date.")
+            raise HTTPException(409, "This status has already been recorded for the selected date and time.")
     status_update = {"status": payload.status.value, "notes": payload.notes, "edited_by": user["id"], "edited_at": datetime.now(timezone.utc).isoformat()}
     if payload.status_date:
         status_update["status_date"] = payload.status_date.isoformat()
+    if payload.status_time:
+        status_update["status_time"] = payload.status_time.isoformat()
     updated = db.table("status_history").update(status_update).eq("id", history_id).execute().data[0]
     latest = db.table("status_history").select("*").eq("mou_id", history["mou_id"]).order("changed_at", desc=True).limit(1).execute().data[0]
     if latest["id"] == history_id:
         db.table("mou").update({"current_status": payload.status.value, "updated_by": user["id"]}).eq("id", history["mou_id"]).execute()
     if status_changed:
-        audit_change(db, "mou", history["mou_id"], "status", {"status": history.get("status"), "date": history.get("status_date")}, {"status": payload.status.value, "date": status_date}, user["id"])
+        audit_change(db, "mou", history["mou_id"], "status", {"status": history.get("status"), "date": history.get("status_date"), "time": history.get("status_time")}, {"status": payload.status.value, "date": status_date, "time": status_time}, user["id"])
     if payload.notes != history.get("notes"):
         audit_change(db, "mou", history["mou_id"], "status_notes", history.get("notes"), payload.notes, user["id"])
     return {"data": updated}
@@ -596,8 +605,8 @@ def correct_status(history_id: str, payload: StatusCorrection, db: Client = Depe
 @app.post("/companies/{company_id}/activities", status_code=201)
 def add_activity(company_id: str, payload: ActivityCreate, db: Client = Depends(require_supabase), user: dict = Depends(require_edit_user)) -> dict:
     one(db, "company", id=company_id)
-    activity = db.table("activity_log").insert({"company_id": company_id, "activity_name": payload.activity_name, "activity_notes": payload.activity_notes, "description": payload.activity_name, "activity_date": payload.activity_date.isoformat() if payload.activity_date else None, "created_by": user["id"]}).execute().data[0]
-    audit_change(db, "company", company_id, "activity", None, {"id": activity["id"], "name": payload.activity_name, "notes": payload.activity_notes, "date": payload.activity_date}, user["id"])
+    activity = db.table("activity_log").insert({"company_id": company_id, "activity_name": payload.activity_name, "activity_notes": payload.activity_notes, "description": payload.activity_name, "activity_date": payload.activity_date.isoformat(), "activity_time": payload.activity_time.isoformat(), "created_by": user["id"]}).execute().data[0]
+    audit_change(db, "company", company_id, "activity", None, {"id": activity["id"], "name": payload.activity_name, "notes": payload.activity_notes, "date": payload.activity_date, "time": payload.activity_time}, user["id"])
     return {"data": activity}
 
 

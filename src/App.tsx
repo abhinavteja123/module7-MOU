@@ -11,8 +11,8 @@ import {
 import {
   Activity,
   ArrowDownToLine,
+  ArrowRight,
   ArrowUpRight,
-  Bell,
   CalendarDays,
   ChevronDown,
   ChevronLeft,
@@ -31,7 +31,6 @@ import {
   Plus,
   Search,
   ShieldCheck,
-  Sparkles,
   Trash2,
   UploadCloud,
   UserPlus,
@@ -83,6 +82,7 @@ type Status =
   | "Renewal"
   | "Closed"
   | "Terminated";
+type CompanyFilter = "All statuses" | "Expires in 30 days" | Status;
 type User = {
   name: string;
   initials: string;
@@ -97,13 +97,21 @@ type ManagedTrackerUser = User & {
   accessLevel: TrackerAccess;
   isActive: boolean;
 };
-type StatusEvent = { status: Status; date: string; user: User };
+type StatusEvent = {
+  status: Status;
+  date: string;
+  effectiveTime?: string;
+  recordedAt?: string;
+  user: User;
+};
 type ActivityItem = {
   id: number | string;
   title: string;
   note: string;
   date: string;
   isoDate?: string;
+  effectiveTime?: string;
+  recordedAt?: string;
   user: User;
 };
 type AuditEvent = {
@@ -140,6 +148,7 @@ type Company = {
   auditLog?: AuditEvent[];
   documentFile?: File;
   lastUpdated: string;
+  lastUpdatedAt?: string;
   lastUpdatedBy: User;
 };
 
@@ -180,31 +189,6 @@ const statuses: Status[] = [
   "Closed",
   "Terminated",
 ];
-const statusGroups: { label: string; statuses: Status[] }[] = [
-  {
-    label: "Preparation",
-    statuses: ["Proposed", "Under discussion", "Drafted"],
-  },
-  {
-    label: "Review & approval",
-    statuses: ["Legal review", "Approval pending", "Approved"],
-  },
-  {
-    label: "Signing",
-    statuses: ["Signed by client", "Signed by university", "Signed by both"],
-  },
-  {
-    label: "Lifecycle",
-    statuses: [
-      "Active",
-      "Expected renewal",
-      "Renewal",
-      "Expired",
-      "Closed",
-      "Terminated",
-    ],
-  },
-];
 const seedCompanies: Company[] = [
   {
     id: 1,
@@ -238,6 +222,49 @@ const seedCompanies: Company[] = [
         note: "Reviewed co-marketing deliverables for Q2.",
         date: "May 08, 2025",
         user: users[0],
+      },
+    ],
+    auditLog: [
+      {
+        id: "demo-status-1",
+        entity_type: "mou",
+        entity_id: "demo-aster-mou",
+        field_name: "status",
+        old_value: JSON.stringify({
+          status: "signed_by_both",
+          date: "2025-01-18",
+          time: "10:00",
+        }),
+        new_value: JSON.stringify({
+          status: "active",
+          date: "2025-01-18",
+          time: "14:30",
+        }),
+        changed_at: "2025-01-18T09:00:00Z",
+        changed_by_user: users[0],
+      },
+      {
+        id: "demo-activity-1",
+        entity_type: "company",
+        entity_id: "1",
+        field_name: "activity",
+        new_value: JSON.stringify({
+          name: "Quarterly review call",
+          notes: "Reviewed co-marketing deliverables for Q2.",
+          date: "2025-05-08",
+          time: "11:00",
+        }),
+        changed_at: "2025-05-08T06:00:00Z",
+        changed_by_user: users[0],
+      },
+      {
+        id: "demo-document-1",
+        entity_type: "mou",
+        entity_id: "demo-aster-mou",
+        field_name: "signed_copy",
+        new_value: JSON.stringify({ filename: "aster-labs-mou.pdf" }),
+        changed_at: "2025-01-18T05:30:00Z",
+        changed_by_user: users[1],
       },
     ],
   },
@@ -366,6 +393,66 @@ function displayDateTime(value?: string) {
         minute: "2-digit",
       });
 }
+function displayTime(value?: string) {
+  if (!value) return "—";
+  const parsed = new Date(`1970-01-01T${value}`);
+  return Number.isNaN(parsed.getTime())
+    ? value
+    : parsed.toLocaleTimeString("en-US", {
+        hour: "numeric",
+        minute: "2-digit",
+      });
+}
+function currentTimeInput() {
+  const now = new Date();
+  return `${String(now.getHours()).padStart(2, "0")}:${String(
+    now.getMinutes(),
+  ).padStart(2, "0")}`;
+}
+function activityDateTime(activity: ActivityItem) {
+  return `Activity date ${activity.date}${activity.effectiveTime ? ` at ${displayTime(activity.effectiveTime)}` : ""}`;
+}
+function TimestampBadge({
+  label,
+  value,
+  by,
+  isoDateTime,
+  className = "",
+}: {
+  label: string;
+  value: string;
+  by?: string;
+  isoDateTime?: string;
+  className?: string;
+}) {
+  return (
+    <span className={`timestamp-badge ${className}`.trim()}>
+      <Clock3 size={11} aria-hidden="true" />
+      <span>
+        <b>{label}</b>
+        <time dateTime={isoDateTime}>{value}</time>
+      </span>
+      {by && <em>by {by}</em>}
+    </span>
+  );
+}
+function ActivityTimestamp({ activity }: { activity: ActivityItem }) {
+  const recordedAt = activity.recordedAt
+    ? displayDateTime(activity.recordedAt)
+    : activity.date;
+  return (
+    <small className="activity-metadata">
+      <span className="activity-scheduled">{activityDateTime(activity)}</span>
+      <TimestampBadge
+        label="Logged"
+        value={recordedAt}
+        by={activity.user.name}
+        isoDateTime={activity.recordedAt}
+        className="activity-recorded"
+      />
+    </small>
+  );
+}
 function previousCalendarMonth(reference = new Date()) {
   const end = new Date(reference.getFullYear(), reference.getMonth(), 1);
   const start = new Date(reference.getFullYear(), reference.getMonth() - 1, 1);
@@ -477,6 +564,8 @@ function fromApiCompany(record: any): Company {
     (entry: any) => ({
       status: statusLabel(entry.status),
       date: displayDate(entry.status_date || entry.changed_at),
+      effectiveTime: entry.status_time,
+      recordedAt: entry.changed_at,
       user: apiUser(entry.changed_by_user),
     }),
   );
@@ -489,6 +578,8 @@ function fromApiCompany(record: any): Company {
         ? displayDate(entry.activity_date)
         : displayDate(entry.created_at),
       isoDate: entry.activity_date || entry.created_at,
+      effectiveTime: entry.activity_time,
+      recordedAt: entry.created_at,
       user: apiUser(entry.created_by_user),
     }),
   );
@@ -523,6 +614,7 @@ function fromApiCompany(record: any): Company {
           day: "2-digit",
         })
       : "—",
+    lastUpdatedAt: mou.updated_at,
     lastUpdatedBy: apiUser(mou.updated_by_user || mou.created_by_user),
     statusHistory: history,
     activities,
@@ -555,7 +647,7 @@ function App() {
     "overview" | "companies" | "activities" | "admin"
   >("overview");
   const [query, setQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState<"All statuses" | Status>(
+  const [statusFilter, setStatusFilter] = useState<CompanyFilter>(
     "All statuses",
   );
   const [showFilters, setShowFilters] = useState(false);
@@ -605,7 +697,10 @@ function App() {
           `${company.name} ${company.city || ""} ${company.scope} ${company.spoc.name}`
             .toLowerCase()
             .includes(query.toLowerCase()) &&
-          (statusFilter === "All statuses" || company.status === statusFilter),
+          (statusFilter === "All statuses" ||
+            (statusFilter === "Expires in 30 days"
+              ? expiresWithinThirtyDays(company, new Date())
+              : company.status === statusFilter)),
       ),
     [companies, query, statusFilter],
   );
@@ -661,9 +756,10 @@ function App() {
               document_content_type:
                 company.documentFile!.type || "application/pdf",
               document_base64: await fileToBase64(company.documentFile!),
-              activity_name: company.activities[0]?.title || null,
-              activity_notes: company.activities[0]?.note || null,
-              activity_date: activityDateValue || null,
+        activity_name: company.activities[0]?.title || null,
+        activity_notes: company.activities[0]?.note || null,
+        activity_date: activityDateValue || null,
+        activity_time: company.activities[0]?.effectiveTime || null,
             });
         const saved = fromApiCompany(result.data);
         if (company.mouId && company.documentFile && saved.mouId)
@@ -687,6 +783,7 @@ function App() {
       } catch (error) {
         console.error(error);
         setSyncState("error");
+        throw error;
       }
     } else
       setCompanies((current) =>
@@ -750,14 +847,6 @@ function App() {
           </nav>
         )}
         <div className="sidebar-footer">
-          <div className="help-card">
-            <Sparkles size={18} />
-            <div>
-              <strong>Need a hand?</strong>
-              <span>Check the tracker guide</span>
-            </div>
-            <ArrowUpRight size={15} />
-          </div>
           <div className="sidebar-user">
             <Avatar user={activeUser} />
             <div>
@@ -787,10 +876,6 @@ function App() {
             </strong>
           </div>
           <div className="top-actions">
-            <button className="icon-button notification">
-              <Bell size={18} />
-              <i></i>
-            </button>
             <div className="user-switcher-wrap">
               <div className="user-switcher">
                 <Avatar user={activeUser} small />
@@ -818,12 +903,12 @@ function App() {
         <div className="content-wrap">
           <div className="page-heading">
             <div>
-              <div className="eyebrow">Workspace administration</div>
-              <h1>Good morning, {activeUser.name.split(" ")[0]}</h1>
+              <div className="eyebrow">MOU operations</div>
+              <h1>{view === "admin" ? "Access control" : "Agreement control center"}</h1>
               <p>
                 {canEdit
-                  ? "Manage MOU records, contacts, internal SPOCs, statuses, documents and activities."
-                  : "Review MOU records, contacts, statuses, documents and activities."}
+                  ? "Track agreements, ownership and operational changes in one reliable workspace."
+                  : "Review agreement status, owners, documents and the complete activity history."}
               </p>
             </div>
             {view !== "admin" && canEdit && (
@@ -853,7 +938,7 @@ function App() {
                   <div className="status-overview-header">
                     <div>
                       <span className="eyebrow">Portfolio snapshot</span>
-                      <h2>Status distribution</h2>
+                      <h2>Portfolio health</h2>
                     </div>
                     <span>{companies.length} total MOUs</span>
                   </div>
@@ -861,7 +946,16 @@ function App() {
                     className="portfolio-kpi-strip"
                     aria-label="MOU health KPIs"
                   >
-                    <div className="portfolio-kpi portfolio-kpi-expiry">
+                    <button
+                      type="button"
+                      className="portfolio-kpi portfolio-kpi-expiry"
+                      aria-label="Show MOUs expiring in 30 days"
+                      onClick={() => {
+                        setStatusFilter("Expires in 30 days");
+                        setShowFilters(true);
+                        setView("companies");
+                      }}
+                    >
                       <span>Expires in 30 days</span>
                       <strong>{expiringSoonCompanies.length}</strong>
                       <small>
@@ -869,63 +963,29 @@ function App() {
                           ? "Agreement needs a renewal decision"
                           : "Agreements need renewal decisions"}
                       </small>
-                    </div>
+                    </button>
+                    {([
+                      ["Active", "Live agreements"],
+                      ["Expected renewal", "Renewal planning needed"],
+                      ["Approved", "Ready for signing"],
+                    ] as const).map(([status, helper]) => (
+                      <button
+                        type="button"
+                        className={`portfolio-kpi portfolio-kpi-${statusValue(status)}`}
+                        key={status}
+                        aria-label={`Show ${status} MOUs`}
+                        onClick={() => {
+                          setStatusFilter(status);
+                          setShowFilters(true);
+                          setView("companies");
+                        }}
+                      >
+                        <span>{status}</span>
+                        <strong>{statusCounts[status]}</strong>
+                        <small>{helper}</small>
+                      </button>
+                    ))}
                   </div>
-                  {syncState === "syncing" && companies.length === 0 ? (
-                    <div className="status-cards-loading">
-                      <Clock3 size={19} />
-                      <div>
-                        <strong>Loading MOU statuses</strong>
-                        <span>Fetching the current records from Supabase…</span>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="status-group-grid">
-                      {statusGroups.map((group) => (
-                        <section className="status-group" key={group.label}>
-                          <h3>{group.label}</h3>
-                          <div className="status-chip-grid">
-                            {group.statuses.map((status) => (
-                              <button
-                                type="button"
-                                className={`status-summary-chip ${statusValue(status)}`}
-                                key={status}
-                                aria-label={`Show ${status} MOUs`}
-                                onClick={() => {
-                                  setStatusFilter(status);
-                                  setShowFilters(true);
-                                  setView("companies");
-                                }}
-                              >
-                                <span className="status-summary-label">
-                                  <i />
-                                  {status}
-                                </span>
-                                <strong>{statusCounts[status]}</strong>
-                              </button>
-                            ))}
-                          </div>
-                        </section>
-                      ))}
-                    </div>
-                  )}
-                </section>
-              )}
-              {view === "overview" && (
-                <section className="insight-banner">
-                  <div className="insight-icon">
-                    <Sparkles size={19} />
-                  </div>
-                  <div>
-                    <strong>Keep every record accountable</strong>
-                    <p>
-                      Status changes, activities and document updates are
-                      attributed to the signed-in admin.
-                    </p>
-                  </div>
-                  <button onClick={() => setView("companies")}>
-                    Open company list <ArrowUpRight size={15} />
-                  </button>
                 </section>
               )}
               <div className="section-header">
@@ -972,16 +1032,17 @@ function App() {
               </div>
               {showFilters && (
                 <div className="filter-row">
-                  <span>Show status</span>
+                  <span>Show records</span>
                   <select
                     value={statusFilter}
                     onChange={(event) =>
                       setStatusFilter(
-                        event.target.value as "All statuses" | Status,
+                        event.target.value as CompanyFilter,
                       )
                     }
                   >
                     <option>All statuses</option>
+                    <option>Expires in 30 days</option>
                     {statuses.map((status) => (
                       <option key={status}>{status}</option>
                     ))}
@@ -1049,7 +1110,16 @@ function App() {
                         </td>
                         <td>
                           <div className="update-cell">
-                            <span>{company.lastUpdated}</span>
+                            <TimestampBadge
+                              label="Updated"
+                              value={
+                                company.lastUpdatedAt
+                                  ? displayDateTime(company.lastUpdatedAt)
+                                  : company.lastUpdated
+                              }
+                              isoDateTime={company.lastUpdatedAt}
+                              className="timestamp-compact"
+                            />
                             <small>
                               by {company.lastUpdatedBy.name.split(" ")[0]}
                             </small>
@@ -1166,12 +1236,14 @@ function CompanyDrawer({
   const [showStatusEdit, setShowStatusEdit] = useState(false);
   const [pendingStatus, setPendingStatus] = useState<Status>(company.status);
   const [statusDate, setStatusDate] = useState(todayInput());
+  const [statusTime, setStatusTime] = useState(currentTimeInput());
   const [savingStatus, setSavingStatus] = useState(false);
   const [statusError, setStatusError] = useState("");
   const statusSaveInFlight = useRef(false);
   const [activityTitle, setActivityTitle] = useState("");
   const [activityNote, setActivityNote] = useState("");
   const [activityDate, setActivityDate] = useState("");
+  const [activityTime, setActivityTime] = useState(currentTimeInput());
   const [documentMenuOpen, setDocumentMenuOpen] = useState(false);
   const [documentError, setDocumentError] = useState("");
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -1188,6 +1260,7 @@ function CompanyDrawer({
     if (!canEdit) return;
     setPendingStatus(company.status);
     setStatusDate(todayInput());
+    setStatusTime(currentTimeInput());
     setStatusError("");
     setShowStatusEdit(true);
   }
@@ -1195,8 +1268,8 @@ function CompanyDrawer({
   async function saveStatus() {
     if (!canEdit) return;
     if (statusSaveInFlight.current) return;
-    if (!statusDate) {
-      setStatusError("A status date is required.");
+    if (!statusDate || !statusTime) {
+      setStatusError("A status date and time are required.");
       return;
     }
     if (pendingStatus === company.status) {
@@ -1211,18 +1284,22 @@ function CompanyDrawer({
         await changeLiveStatus(company.mouId, {
           status: statusValue(pendingStatus),
           status_date: statusDate,
+          status_time: statusTime,
         });
       const now = new Date().toISOString();
       onSave({
         ...company,
         status: pendingStatus,
         lastUpdated: "Just now",
+        lastUpdatedAt: now,
         lastUpdatedBy: activeUser,
         statusHistory: [
           ...company.statusHistory,
           {
             status: pendingStatus,
             date: formatDate(statusDate),
+            effectiveTime: statusTime,
+            recordedAt: now,
             user: activeUser,
           },
         ],
@@ -1248,13 +1325,14 @@ function CompanyDrawer({
   async function addActivity(event: FormEvent) {
     event.preventDefault();
     if (!canEdit) return;
-    if (!activityTitle.trim() || !activityDate) return;
+    if (!activityTitle.trim() || !activityDate || !activityTime) return;
     try {
       if (isLiveMode && typeof company.id === "string")
         await addLiveActivity(company.id, {
           activity_name: activityTitle.trim(),
           activity_notes: activityNote.trim() || null,
           activity_date: activityDate,
+          activity_time: activityTime,
         });
       const newActivity = {
         id: Date.now(),
@@ -1264,17 +1342,21 @@ function CompanyDrawer({
           "Primary activity logged from the MOU workspace.",
         date: formatDate(activityDate),
         isoDate: activityDate,
+        effectiveTime: activityTime,
+        recordedAt: new Date().toISOString(),
         user: activeUser,
       };
       onSave({
         ...company,
         lastUpdated: "Just now",
+        lastUpdatedAt: newActivity.recordedAt,
         lastUpdatedBy: activeUser,
         activities: [newActivity, ...company.activities],
       });
       setActivityTitle("");
       setActivityNote("");
       setActivityDate("");
+      setActivityTime(currentTimeInput());
     } catch (error) {
       console.error(error);
     }
@@ -1294,6 +1376,7 @@ function CompanyDrawer({
         documentSize: `${(file.size / 1024 / 1024).toFixed(1)} MB`,
         documentFile: file,
         lastUpdated: "Just now",
+        lastUpdatedAt: new Date().toISOString(),
         lastUpdatedBy: activeUser,
       });
     } catch (error) {
@@ -1417,19 +1500,34 @@ function CompanyDrawer({
                     <option key={status}>{status}</option>
                   ))}
                 </select>
-                <label>
-                  <span>Status date *</span>
-                  <input
-                    required
-                    type="date"
-                    value={statusDate}
-                    onChange={(event) => {
-                      setStatusDate(event.target.value);
-                      setStatusError("");
-                    }}
-                    disabled={savingStatus}
-                  />
-                </label>
+                <div className="status-datetime-fields">
+                  <label>
+                    <span>Effective date *</span>
+                    <input
+                      required
+                      type="date"
+                      value={statusDate}
+                      onChange={(event) => {
+                        setStatusDate(event.target.value);
+                        setStatusError("");
+                      }}
+                      disabled={savingStatus}
+                    />
+                  </label>
+                  <label>
+                    <span>Time *</span>
+                    <input
+                      required
+                      type="time"
+                      value={statusTime}
+                      onChange={(event) => {
+                        setStatusTime(event.target.value);
+                        setStatusError("");
+                      }}
+                      disabled={savingStatus}
+                    />
+                  </label>
+                </div>
                 {statusError && <p className="status-error">{statusError}</p>}
                 <div className="status-editor-actions">
                   <button
@@ -1465,7 +1563,16 @@ function CompanyDrawer({
             ) : <span className={statusClass(company.status)}><i></i>{company.status}</span>}
           </div>
           <div className="updated-by">
-            <span>Last updated {company.lastUpdated}</span>
+            <TimestampBadge
+              label="Last updated"
+              value={
+                company.lastUpdatedAt
+                  ? displayDateTime(company.lastUpdatedAt)
+                  : company.lastUpdated
+              }
+              isoDateTime={company.lastUpdatedAt}
+              className="timestamp-header"
+            />
             <div>
               <Avatar user={company.lastUpdatedBy} small />{" "}
               {company.lastUpdatedBy.name}
@@ -1659,10 +1766,11 @@ function CompanyDrawer({
                     {company.activities[0]?.note ||
                       "Add an activity linked to the MOU."}
                   </p>
-                  <small>
-                    {company.activities[0]?.date || "—"} ·{" "}
-                    {company.activities[0]?.user.name || "—"}
-                  </small>
+                  {company.activities[0] ? (
+                    <ActivityTimestamp activity={company.activities[0]} />
+                  ) : (
+                    <small>Activity date —</small>
+                  )}
                 </div>
               </div>
             </div>
@@ -1701,9 +1809,25 @@ function CompanyDrawer({
                         <em>Current</em>
                       )}
                     </div>
-                    <p>
-                      {event.date} · Updated by {event.user.name}
-                    </p>
+                    <div className="status-history-meta">
+                      <span>
+                        Effective {event.date}
+                        {event.effectiveTime
+                          ? ` at ${displayTime(event.effectiveTime)}`
+                          : ""}
+                      </span>
+                      <TimestampBadge
+                        label="Recorded"
+                        value={
+                          event.recordedAt
+                            ? displayDateTime(event.recordedAt)
+                            : event.date
+                        }
+                        by={event.user.name}
+                        isoDateTime={event.recordedAt}
+                        className="timestamp-status"
+                      />
+                    </div>
                   </div>
                 </div>
               ))}
@@ -1751,15 +1875,26 @@ function CompanyDrawer({
                 ></textarea>
               </label>
               <div className="form-row">
-                <label>
-                  <span>Activity date *</span>
-                  <input
-                    required
-                    type="date"
-                    value={activityDate}
-                    onChange={(event) => setActivityDate(event.target.value)}
-                  />
-                </label>
+                <div className="activity-datetime-fields">
+                  <label>
+                    <span>Activity date *</span>
+                    <input
+                      required
+                      type="date"
+                      value={activityDate}
+                      onChange={(event) => setActivityDate(event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    <span>Time *</span>
+                    <input
+                      required
+                      type="time"
+                      value={activityTime}
+                      onChange={(event) => setActivityTime(event.target.value)}
+                    />
+                  </label>
+                </div>
                 <button className="primary-button compact" type="submit">
                   <Plus size={15} /> Add activity
                 </button>
@@ -1774,9 +1909,7 @@ function CompanyDrawer({
                   <div>
                     <strong>{activity.title}</strong>
                     <p>{activity.note}</p>
-                    <small>
-                      {activity.date} · {activity.user.name}
-                    </small>
+                    <ActivityTimestamp activity={activity} />
                   </div>
                 </div>
               ))}
@@ -1958,12 +2091,18 @@ function AuditLog({ events }: { events: AuditEvent[] }) {
       if (typeof parsed === "string") return statusLabel(parsed);
       if (typeof parsed === "object" && "status" in parsed) {
         const status = statusLabel(String(parsed.status));
-        return `${status}${parsed.date ? ` · ${formatDate(String(parsed.date))}` : ""}`;
+        const dateTime = parsed.date
+          ? ` · ${formatDate(String(parsed.date))}${parsed.time ? ` at ${displayTime(String(parsed.time))}` : ""}`
+          : "";
+        return `${status}${dateTime}`;
       }
     }
     if (field === "activity" && typeof parsed === "object") {
       const name = String(parsed.name || parsed.title || "Activity");
-      return `${name}${parsed.date ? ` · ${formatDate(String(parsed.date))}` : ""}`;
+      const dateTime = parsed.date
+        ? ` · ${formatDate(String(parsed.date))}${parsed.time ? ` at ${displayTime(String(parsed.time))}` : ""}`
+        : "";
+      return `${name}${dateTime}`;
     }
     if (field === "signed_copy" && typeof parsed === "object") {
       const path = String(parsed.path || parsed.filename || "MOU signed copy");
@@ -1973,13 +2112,34 @@ function AuditLog({ events }: { events: AuditEvent[] }) {
   }
 
   function eventTitle(event: AuditEvent) {
-    if (event.field_name === "status") return "Status changed";
-    if (event.field_name === "activity") return "Activity logged";
+    if (event.field_name === "status") return "MOU status updated";
+    if (event.field_name === "activity") return "Primary activity recorded";
     if (event.field_name === "signed_copy")
       return event.old_value ? "Signed copy replaced" : "Signed copy uploaded";
     return `${fieldLabels[event.field_name] || event.field_name} ${
       event.old_value ? "updated" : "added"
     }`;
+  }
+
+  function eventDetail(event: AuditEvent) {
+    const parsed = valueFromAudit(event.new_value);
+    if (
+      event.field_name === "activity" &&
+      parsed &&
+      typeof parsed === "object" &&
+      typeof parsed.notes === "string" &&
+      parsed.notes.trim()
+    )
+      return parsed.notes.trim();
+    return null;
+  }
+
+  function valueLabel(event: AuditEvent) {
+    if (event.field_name === "status")
+      return event.old_value ? "Changed to" : "Status set to";
+    if (event.field_name === "activity") return "Activity";
+    if (event.field_name === "signed_copy") return "Document";
+    return event.old_value ? "After" : "Added";
   }
 
   function eventIcon(event: AuditEvent) {
@@ -2005,8 +2165,11 @@ function AuditLog({ events }: { events: AuditEvent[] }) {
         </div>
       ) : (
         <div className="audit-list">
-          {events.map((event) => (
-            <div className="audit-item" key={event.id}>
+          {events.map((event) => {
+            const actor = apiUser(event.changed_by_user);
+            const detail = eventDetail(event);
+            return (
+            <article className="audit-item" key={event.id}>
               <div className={`audit-marker audit-${event.field_name}`}>
                 {eventIcon(event)}
               </div>
@@ -2014,11 +2177,21 @@ function AuditLog({ events }: { events: AuditEvent[] }) {
                 <div className="audit-heading">
                   <div>
                     <strong>{eventTitle(event)}</strong>
-                    <small>
-                      Changed by {apiUser(event.changed_by_user).name}
-                    </small>
+                    <span className="audit-actor">
+                      Changed by <b>{actor.name}</b>
+                      {actor.email && actor.email !== actor.name
+                        ? ` · ${actor.email}`
+                        : ""}
+                    </span>
                   </div>
-                  <time>{displayDateTime(event.changed_at)}</time>
+                  <div className="audit-when">
+                    <span>
+                      <Clock3 size={10} aria-hidden="true" /> Recorded
+                    </span>
+                    <time dateTime={event.changed_at}>
+                      {displayDateTime(event.changed_at)}
+                    </time>
+                  </div>
                 </div>
                 <div
                   className={`audit-change ${
@@ -2027,23 +2200,30 @@ function AuditLog({ events }: { events: AuditEvent[] }) {
                 >
                   {event.old_value && (
                     <div className="audit-value audit-old">
-                      <span>Previous</span>
+                      <span>Before</span>
                       <strong>
                         {friendly(event.old_value, event.field_name)}
                       </strong>
                     </div>
                   )}
-                  {event.old_value && <ArrowUpRight size={13} />}
+                  {event.old_value && <ArrowRight size={15} aria-hidden="true" />}
                   <div className="audit-value audit-new">
-                    <span>{event.old_value ? "New" : "Added"}</span>
+                    <span>{valueLabel(event)}</span>
                     <strong>
                       {friendly(event.new_value, event.field_name)}
                     </strong>
                   </div>
                 </div>
+                {detail && (
+                  <div className="audit-detail">
+                    <span>Details</span>
+                    <p>{detail}</p>
+                  </div>
+                )}
               </div>
-            </div>
-          ))}
+            </article>
+            );
+          })}
         </div>
       )}
     </div>
@@ -2059,7 +2239,7 @@ function CompanyModal({
   activeUser: User;
   company?: Company;
   onClose: () => void;
-  onSave: (company: Company) => void;
+  onSave: (company: Company) => Promise<void> | void;
 }) {
   const [name, setName] = useState(company?.name || "");
   const [city, setCity] = useState(
@@ -2101,9 +2281,13 @@ function CompanyModal({
   const [activityName, setActivityName] = useState("");
   const [activityNotes, setActivityNotes] = useState("");
   const [activityDate, setActivityDate] = useState("");
+  const [activityTime, setActivityTime] = useState(currentTimeInput());
   const [document, setDocument] = useState<File | null>(null);
-  function submit(event: FormEvent) {
+  const [saveError, setSaveError] = useState("");
+  const [saving, setSaving] = useState(false);
+  async function submit(event: FormEvent) {
     event.preventDefault();
+    setSaveError("");
     if (
       !name.trim() ||
       !city.trim() ||
@@ -2118,7 +2302,7 @@ function CompanyModal({
       !contactEmail.trim() ||
       !contactPhone.trim() ||
       (!company && !document) ||
-      (activityName.trim() && !activityDate)
+      (activityName.trim() && (!activityDate || !activityTime))
     )
       return;
     const spoc = {
@@ -2138,6 +2322,8 @@ function CompanyModal({
               "Primary activity logged from the MOU workspace.",
             date: formatDate(activityDate),
             isoDate: activityDate,
+            effectiveTime: activityTime,
+            recordedAt: new Date().toISOString(),
             user: activeUser,
           },
         ]
@@ -2164,11 +2350,13 @@ function CompanyModal({
         ? `${(document.size / 1024 / 1024).toFixed(1)} MB`
         : company?.documentSize,
       lastUpdated: "Just now",
+      lastUpdatedAt: new Date().toISOString(),
       lastUpdatedBy: activeUser,
       statusHistory: company?.statusHistory || [
         {
           status,
           date: displayDate(new Date().toISOString()),
+          recordedAt: new Date().toISOString(),
           user: activeUser,
         },
       ],
@@ -2176,7 +2364,19 @@ function CompanyModal({
       auditLog: company?.auditLog || [],
       documentFile: document || undefined,
     };
-    onSave(next);
+    setSaving(true);
+    try {
+      await onSave(next);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to save this MOU record.";
+      try {
+        setSaveError(JSON.parse(message).detail || "Unable to save this MOU record.");
+      } catch {
+        setSaveError(message);
+      }
+    } finally {
+      setSaving(false);
+    }
   }
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -2416,6 +2616,15 @@ function CompanyModal({
                   />
                 </label>
                 <label>
+                  <span>Activity time {activityName.trim() ? "*" : "(optional)"}</span>
+                  <input
+                    required={Boolean(activityName.trim())}
+                    type="time"
+                    value={activityTime}
+                    onChange={(event) => setActivityTime(event.target.value)}
+                  />
+                </label>
+                <label>
                   <span>
                     Activity notes <small>optional</small>
                   </span>
@@ -2435,6 +2644,7 @@ function CompanyModal({
               the admin and exact timestamp.
             </span>
           </div>
+          {saveError && <p className="status-error modal-save-error">{saveError}</p>}
           <div className="modal-footer">
             <button
               type="button"
@@ -2443,12 +2653,12 @@ function CompanyModal({
             >
               Cancel
             </button>
-            <button className="primary-button" type="submit">
+            <button className="primary-button" type="submit" disabled={saving}>
               {company ? (
-                "Save changes"
+                saving ? "Saving…" : "Save changes"
               ) : (
                 <>
-                  <Plus size={16} /> Create company
+                  <Plus size={16} /> {saving ? "Creating…" : "Create company"}
                 </>
               )}
             </button>
@@ -2471,6 +2681,7 @@ function AdminAccessPage({
   const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [passwordConfirmation, setPasswordConfirmation] = useState("");
   const [accessLevel, setAccessLevel] = useState<TrackerAccess>("view");
   const [resetUser, setResetUser] = useState<ManagedTrackerUser | null>(null);
   const [resetPassword, setResetPassword] = useState("");
@@ -2480,18 +2691,24 @@ function AdminAccessPage({
 
   async function addUser(event: FormEvent) {
     event.preventDefault();
+    if (password !== passwordConfirmation) {
+      setError("The temporary password and confirmation do not match.");
+      return;
+    }
     setSaving(true); setError(""); setMessage("");
+    const loginEmail = email.trim().toLowerCase();
+    const userName = displayName.trim();
     try {
       if (isLiveMode) {
-        const result = await createLiveUser({ email, display_name: displayName, password, access_level: accessLevel });
+        const result = await createLiveUser({ email: loginEmail, display_name: userName, password, access_level: accessLevel });
         onUsersChange((current) => [...current, managedApiUser(result.data)].sort((a, b) => a.name.localeCompare(b.name)));
       } else {
         onUsersChange((current) => [...current, {
-          ...apiUser({ email, display_name: displayName }), id: `demo-user-${Date.now()}`, role: "user" as const, accessLevel, isActive: true,
+          ...apiUser({ email: loginEmail, display_name: userName }), id: `demo-user-${Date.now()}`, role: "user" as const, accessLevel, isActive: true,
         }].sort((a, b) => a.name.localeCompare(b.name)));
       }
-      setDisplayName(""); setEmail(""); setPassword(""); setAccessLevel("view");
-      setMessage("User added. Share the temporary password securely.");
+      setDisplayName(""); setEmail(""); setPassword(""); setPasswordConfirmation(""); setAccessLevel("view");
+      setMessage(`${userName} was added as an ${accessLevel === "edit" ? "editor" : "viewer"}. They sign in with ${loginEmail}.`);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Unable to add user.");
     } finally { setSaving(false); }
@@ -2555,11 +2772,13 @@ function AdminAccessPage({
         <form className="user-management-form" onSubmit={addUser}>
           <strong><UserPlus size={15} /> Add tracker user</strong>
           <div className="user-form-grid">
-            <label>Full name<input required value={displayName} onChange={(event) => setDisplayName(event.target.value)} /></label>
-            <label>Email<input required type="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label>
-            <label>Temporary password<input required minLength={8} type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
+            <label>Full name<input required autoComplete="name" value={displayName} onChange={(event) => setDisplayName(event.target.value)} /></label>
+            <label>Login email address<input required type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label>
+            <label>Temporary password<input required minLength={8} type="password" autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
+            <label>Confirm temporary password<input required minLength={8} type="password" autoComplete="new-password" value={passwordConfirmation} onChange={(event) => setPasswordConfirmation(event.target.value)} /></label>
             <label>Access<select value={accessLevel} onChange={(event) => setAccessLevel(event.target.value as TrackerAccess)}><option value="view">View only</option><option value="edit">Edit tracker</option></select></label>
           </div>
+          <small className="user-login-hint">The user must sign in with the login email address above, not their display name.</small>
           <button className="primary-button compact" disabled={saving}><UserPlus size={15} /> Add user</button>
         </form>
         {message && <p className="user-management-message">{message}</p>}
@@ -2660,9 +2879,7 @@ function ActivityFeed({ companies }: { companies: Company[] }) {
                 <span className="activity-company">{activity.company}</span>
               </div>
               <p>{activity.note}</p>
-              <small>
-                {activity.date} · {activity.user.name}
-              </small>
+              <ActivityTimestamp activity={activity} />
             </div>
             <ArrowUpRight size={16} className="activity-arrow" />
           </div>

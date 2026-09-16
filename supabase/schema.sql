@@ -79,6 +79,7 @@ create table if not exists public.status_history (
   mou_id uuid not null references public.mou(id) on delete cascade,
   status public.mou_status not null,
   status_date date not null,
+  status_time time not null,
   changed_by uuid not null references public.users(id),
   changed_at timestamptz not null default now(),
   is_initial boolean not null default false,
@@ -90,14 +91,15 @@ create table if not exists public.status_history (
 create unique index if not exists one_initial_status_per_mou
   on public.status_history(mou_id) where is_initial = true;
 
-create unique index if not exists status_history_unique_mou_status_date
-  on public.status_history(mou_id, status, status_date)
+create unique index if not exists status_history_unique_mou_status_datetime
+  on public.status_history(mou_id, status, status_date, status_time)
   where is_initial = false;
 
 create table if not exists public.activity_log (
   id uuid primary key default gen_random_uuid(),
   company_id uuid not null references public.company(id) on delete cascade,
   activity_date date,
+  activity_time time,
   activity_name text,
   activity_notes text,
   description text not null,
