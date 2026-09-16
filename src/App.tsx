@@ -441,16 +441,15 @@ function ActivityTimestamp({ activity }: { activity: ActivityItem }) {
     ? displayDateTime(activity.recordedAt)
     : activity.date;
   return (
-    <small className="activity-metadata">
+    <div className="activity-metadata">
       <span className="activity-scheduled">{activityDateTime(activity)}</span>
-      <TimestampBadge
-        label="Logged"
-        value={recordedAt}
-        by={activity.user.name}
-        isoDateTime={activity.recordedAt}
-        className="activity-recorded"
-      />
-    </small>
+      <span className="activity-meta-sep">·</span>
+      <span className="activity-recorded">
+        <Clock3 size={11} aria-hidden="true" />
+        <span>Logged {recordedAt}</span>
+        <em>by {activity.user.name}</em>
+      </span>
+    </div>
   );
 }
 function previousCalendarMonth(reference = new Date()) {
@@ -903,12 +902,12 @@ function App() {
         <div className="content-wrap">
           <div className="page-heading">
             <div>
-              <div className="eyebrow">MOU operations</div>
+              <div className="eyebrow">Institutional Governance</div>
               <h1>{view === "admin" ? "Access control" : "Agreement control center"}</h1>
               <p>
                 {canEdit
-                  ? "Track agreements, ownership and operational changes in one reliable workspace."
-                  : "Review agreement status, owners, documents and the complete activity history."}
+                  ? "Manage corporate partnerships, renewal milestones, and operational compliance."
+                  : "Review institutional agreement records, ownership, and comprehensive audit trails."}
               </p>
             </div>
             {view !== "admin" && canEdit && (
@@ -916,7 +915,7 @@ function App() {
                 className="primary-button"
                 onClick={() => setShowAddModal(true)}
               >
-                <Plus size={17} /> Add company
+                <Plus size={16} /> Add company
               </button>
             )}
           </div>
@@ -929,7 +928,7 @@ function App() {
           ) : view === "activities" ? (
             <ActivityFeed companies={companies} />
           ) : (
-            <section className="portfolio-section">
+            <>
               {view === "overview" && (
                 <section
                   className="status-overview"
@@ -937,10 +936,14 @@ function App() {
                 >
                   <div className="status-overview-header">
                     <div>
-                      <span className="eyebrow">Portfolio snapshot</span>
                       <h2>Portfolio health</h2>
+                      <p className="overview-subtitle">
+                        Real-time status distribution across active institutional agreements
+                      </p>
                     </div>
-                    <span>{companies.length} total MOUs</span>
+                    <span className="portfolio-total-badge">
+                      {companies.length} agreements
+                    </span>
                   </div>
                   <div
                     className="portfolio-kpi-strip"
@@ -956,19 +959,22 @@ function App() {
                         setView("companies");
                       }}
                     >
-                      <span>Expires in 30 days</span>
-                      <strong>{expiringSoonCompanies.length}</strong>
-                      <small>
+                      <div className="kpi-header">
+                        <span className="kpi-label">Expiring Soon</span>
+                        <span className="kpi-tag kpi-tag-amber">30d window</span>
+                      </div>
+                      <strong className="kpi-value">{expiringSoonCompanies.length}</strong>
+                      <small className="kpi-hint">
                         {expiringSoonCompanies.length === 1
-                          ? "Agreement needs a renewal decision"
-                          : "Agreements need renewal decisions"}
+                          ? "1 agreement requires renewal review"
+                          : `${expiringSoonCompanies.length} agreements need renewal decisions`}
                       </small>
                     </button>
                     {([
-                      ["Active", "Live agreements"],
-                      ["Expected renewal", "Renewal planning needed"],
-                      ["Approved", "Ready for signing"],
-                    ] as const).map(([status, helper]) => (
+                      ["Active", "Live agreements in operational effect", "In Effect", "emerald"],
+                      ["Expected renewal", "Agreements in renegotiation cycle", "Renewal Queue", "purple"],
+                      ["Approved", "Cleared through review · ready for signing", "Ready to Sign", "blue"],
+                    ] as const).map(([status, helper, tag, color]) => (
                       <button
                         type="button"
                         className={`portfolio-kpi portfolio-kpi-${statusValue(status)}`}
@@ -980,206 +986,212 @@ function App() {
                           setView("companies");
                         }}
                       >
-                        <span>{status}</span>
-                        <strong>{statusCounts[status]}</strong>
-                        <small>{helper}</small>
+                        <div className="kpi-header">
+                          <span className="kpi-label">{status}</span>
+                          <span className={`kpi-tag kpi-tag-${color}`}>{tag}</span>
+                        </div>
+                        <strong className="kpi-value">{statusCounts[status] ?? 0}</strong>
+                        <small className="kpi-hint">{helper}</small>
                       </button>
                     ))}
                   </div>
                 </section>
               )}
-              <div className="section-header">
-                <div>
-                  <h2>
-                    {view === "companies" ? "All companies" : "MOU portfolio"}
-                  </h2>
-                  <p>Every company and agreement in your workspace.</p>
-                </div>
-                <div className="section-meta">
-                  <span
-                    className={`live-dot ${syncState === "error" ? "sync-error" : ""}`}
-                  ></span>
-                  {syncState === "demo"
-                    ? "Demo data"
-                    : syncState === "syncing"
-                      ? "Syncing…"
-                      : syncState === "error"
-                        ? "Sync error"
-                        : "Synced just now"}
-                </div>
-              </div>
-              <div className="toolbar">
-                <div className="search-box">
-                  <Search size={17} />
-                  <input
-                    value={query}
-                    onChange={(event) => setQuery(event.target.value)}
-                    placeholder="Search companies, city, scope or SPOC"
-                  />
-                </div>
-                <button
-                  className={`secondary-button ${showFilters ? "selected" : ""}`}
-                  onClick={() => setShowFilters((current) => !current)}
-                >
-                  <Filter size={16} /> Filter
-                  {statusFilter !== "All statuses" && (
-                    <span className="filter-count">1</span>
-                  )}
-                </button>
-                <button className="secondary-button export-button">
-                  <ArrowDownToLine size={16} /> Export
-                </button>
-              </div>
-              {showFilters && (
-                <div className="filter-row">
-                  <span>Show records</span>
-                  <select
-                    value={statusFilter}
-                    onChange={(event) =>
-                      setStatusFilter(
-                        event.target.value as CompanyFilter,
-                      )
-                    }
-                  >
-                    <option>All statuses</option>
-                    <option>Expires in 30 days</option>
-                    {statuses.map((status) => (
-                      <option key={status}>{status}</option>
-                    ))}
-                  </select>
-                  {statusFilter !== "All statuses" && (
-                    <button onClick={() => setStatusFilter("All statuses")}>
-                      Clear
-                    </button>
-                  )}
-                </div>
-              )}
-              <div className="table-shell">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Company</th>
-                      <th>City</th>
-                      <th>Status</th>
-                      <th>Expiry date</th>
-                      <th>Internal SPOC</th>
-                      <th>Last update</th>
-                      <th></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredCompanies.map((company) => (
-                      <tr
-                        key={company.id}
-                        onClick={() => setSelectedId(company.id)}
-                      >
-                        <td>
-                          <div className="company-cell">
-                            <div
-                              className="company-logo"
-                              style={{ background: company.logoColor }}
-                            >
-                              {company.logo}
-                            </div>
-                            <div>
-                              <strong>{company.name}</strong>
-                              <span>{company.scope}</span>
-                            </div>
-                          </div>
-                        </td>
-                        <td>{company.city || "—"}</td>
-                        <td>
-                          <span className={statusClass(company.status)}>
-                            <i></i>
-                            {company.status}
-                          </span>
-                        </td>
-                        <td>
-                          <div
-                            className={`expiry-cell ${company.status === "Expired" ? "warning" : ""}`}
-                          >
-                            <CalendarDays size={14} />
-                            <span>{company.expiryDate}</span>
-                          </div>
-                        </td>
-                        <td>
-                          <div className="spoc-cell">
-                            <Avatar user={company.spoc} small />
-                            <span>{company.spoc.name}</span>
-                          </div>
-                        </td>
-                        <td>
-                          <div className="update-cell">
-                            <TimestampBadge
-                              label="Updated"
-                              value={
-                                company.lastUpdatedAt
-                                  ? displayDateTime(company.lastUpdatedAt)
-                                  : company.lastUpdated
-                              }
-                              isoDateTime={company.lastUpdatedAt}
-                              className="timestamp-compact"
-                            />
-                            <small>
-                              by {company.lastUpdatedBy.name.split(" ")[0]}
-                            </small>
-                          </div>
-                        </td>
-                        <td>
-                          <button
-                            className="row-action"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              setSelectedId(company.id);
-                            }}
-                          >
-                            <ArrowUpRight size={16} />
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                {filteredCompanies.length === 0 && (
-                  <div className="empty-state">
-                    {syncState === "syncing" ? (
-                      <Clock3 size={24} />
-                    ) : (
-                      <Search size={24} />
-                    )}
-                    <strong>
-                      {syncState === "syncing"
-                        ? "Loading MOU records from Supabase"
-                        : syncState === "error"
-                          ? "Could not load MOU records"
-                          : "No MOUs match that search"}
-                    </strong>
+              <section className="portfolio-section">
+                <div className="section-header">
+                  <div>
+                    <h2>
+                      {view === "companies" ? "All companies" : "MOU portfolio"}
+                    </h2>
+                    <p>Central register of institutional partnerships, designated owners, and active terms.</p>
+                  </div>
+                  <div className="section-meta">
+                    <span
+                      className={`live-dot ${syncState === "error" ? "sync-error" : ""}`}
+                    ></span>
                     <span>
-                      {syncState === "syncing"
-                        ? "The workspace will populate as soon as the live request finishes."
-                        : syncState === "error"
-                          ? "Check the API connection, then refresh the page."
-                          : "Try another company, scope or status."}
+                      {syncState === "demo"
+                        ? "Demo data"
+                        : syncState === "syncing"
+                          ? "Syncing…"
+                          : syncState === "error"
+                            ? "Sync error"
+                            : "Synced just now"}
                     </span>
                   </div>
-                )}
-              </div>
-              <div className="table-footer">
-                <span>
-                  Showing <strong>{filteredCompanies.length}</strong> of{" "}
-                  {companies.length} companies
-                </span>
-                <div className="pagination">
-                  <button>
-                    <ChevronLeft size={15} />
+                </div>
+                <div className="toolbar">
+                  <div className="search-box">
+                    <Search size={16} />
+                    <input
+                      value={query}
+                      onChange={(event) => setQuery(event.target.value)}
+                      placeholder="Search companies, city, scope or SPOC"
+                    />
+                  </div>
+                  <button
+                    className={`secondary-button ${showFilters ? "selected" : ""}`}
+                    onClick={() => setShowFilters((current) => !current)}
+                  >
+                    <Filter size={15} /> Filter
+                    {statusFilter !== "All statuses" && (
+                      <span className="filter-count">1</span>
+                    )}
                   </button>
-                  <button className="current-page">1</button>
-                  <button>
-                    <ChevronRight size={15} />
+                  <button className="secondary-button export-button">
+                    <ArrowDownToLine size={15} /> Export
                   </button>
                 </div>
-              </div>
-            </section>
+                {showFilters && (
+                  <div className="filter-row">
+                    <span>Show records</span>
+                    <select
+                      value={statusFilter}
+                      onChange={(event) =>
+                        setStatusFilter(
+                          event.target.value as CompanyFilter,
+                        )
+                      }
+                    >
+                      <option>All statuses</option>
+                      <option>Expires in 30 days</option>
+                      {statuses.map((status) => (
+                        <option key={status}>{status}</option>
+                      ))}
+                    </select>
+                    {statusFilter !== "All statuses" && (
+                      <button onClick={() => setStatusFilter("All statuses")}>
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                )}
+                <div className="table-shell">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Company</th>
+                        <th>City</th>
+                        <th>Status</th>
+                        <th>Expiry date</th>
+                        <th>Internal SPOC</th>
+                        <th>Last update</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredCompanies.map((company) => (
+                        <tr
+                          key={company.id}
+                          onClick={() => setSelectedId(company.id)}
+                        >
+                          <td>
+                            <div className="company-cell">
+                              <div
+                                className="company-logo"
+                                style={{ background: company.logoColor }}
+                              >
+                                {company.logo}
+                              </div>
+                              <div>
+                                <strong>{company.name}</strong>
+                                <span>{company.scope}</span>
+                              </div>
+                            </div>
+                          </td>
+                          <td>{company.city || "—"}</td>
+                          <td>
+                            <span className={statusClass(company.status)}>
+                              <i></i>
+                              {company.status}
+                            </span>
+                          </td>
+                          <td>
+                            <div
+                              className={`expiry-cell ${company.status === "Expired" ? "warning" : ""}`}
+                            >
+                              <CalendarDays size={14} />
+                              <span>{company.expiryDate}</span>
+                            </div>
+                          </td>
+                          <td>
+                            <div className="spoc-cell">
+                              <Avatar user={company.spoc} small />
+                              <span>{company.spoc.name}</span>
+                            </div>
+                          </td>
+                          <td>
+                            <div
+                              className="update-cell"
+                              title={`Last updated ${company.lastUpdatedAt ? displayDateTime(company.lastUpdatedAt) : company.lastUpdated} by ${company.lastUpdatedBy.name}`}
+                            >
+                              <span className="update-date">
+                                {company.lastUpdatedAt
+                                  ? displayDateTime(company.lastUpdatedAt)
+                                  : company.lastUpdated}
+                              </span>
+                              <span className="update-author">
+                                by {company.lastUpdatedBy.name.split(" ")[0]}
+                              </span>
+                            </div>
+                          </td>
+                          <td>
+                            <button
+                              className="row-action"
+                              aria-label={`Open details for ${company.name}`}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                setSelectedId(company.id);
+                              }}
+                            >
+                              <ArrowUpRight size={15} />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {filteredCompanies.length === 0 && (
+                    <div className="empty-state">
+                      {syncState === "syncing" ? (
+                        <Clock3 size={24} />
+                      ) : (
+                        <Search size={24} />
+                      )}
+                      <strong>
+                        {syncState === "syncing"
+                          ? "Loading agreement records…"
+                          : syncState === "error"
+                            ? "Could not load agreement records"
+                            : "No agreements match that search"}
+                      </strong>
+                      <span>
+                        {syncState === "syncing"
+                          ? "Synchronizing the latest partnership data."
+                          : syncState === "error"
+                            ? "Check the API connection, then refresh the page."
+                            : "Try another company, scope or status."}
+                      </span>
+                    </div>
+                  )}
+                </div>
+                <div className="table-footer">
+                  <span>
+                    Showing <strong>{filteredCompanies.length}</strong> of{" "}
+                    {companies.length} companies
+                  </span>
+                  <div className="pagination">
+                    <button>
+                      <ChevronLeft size={15} />
+                    </button>
+                    <button className="current-page">1</button>
+                    <button>
+                      <ChevronRight size={15} />
+                    </button>
+                  </div>
+                </div>
+              </section>
+            </>
           )}
         </div>
       </main>
@@ -1502,8 +1514,9 @@ function CompanyDrawer({
                 </select>
                 <div className="status-datetime-fields">
                   <label>
-                    <span>Effective date *</span>
+                    <span>Status date *</span>
                     <input
+                      aria-label="Status date *"
                       required
                       type="date"
                       value={statusDate}
@@ -2112,7 +2125,7 @@ function AuditLog({ events }: { events: AuditEvent[] }) {
   }
 
   function eventTitle(event: AuditEvent) {
-    if (event.field_name === "status") return "MOU status updated";
+    if (event.field_name === "status") return "Status changed";
     if (event.field_name === "activity") return "Primary activity recorded";
     if (event.field_name === "signed_copy")
       return event.old_value ? "Signed copy replaced" : "Signed copy uploaded";
@@ -2175,19 +2188,17 @@ function AuditLog({ events }: { events: AuditEvent[] }) {
               </div>
               <div className="audit-content">
                 <div className="audit-heading">
-                  <div>
-                    <strong>{eventTitle(event)}</strong>
-                    <span className="audit-actor">
-                      Changed by <b>{actor.name}</b>
-                      {actor.email && actor.email !== actor.name
-                        ? ` · ${actor.email}`
-                        : ""}
-                    </span>
+                  <div className="audit-header-info">
+                    <strong className="audit-title">{eventTitle(event)}</strong>
+                    <div className="audit-actor">
+                      <span>Changed by</span> <b>{actor.name}</b>
+                      {actor.email && actor.email !== actor.name ? (
+                        <span className="audit-actor-email"> · {actor.email}</span>
+                      ) : null}
+                    </div>
                   </div>
                   <div className="audit-when">
-                    <span>
-                      <Clock3 size={10} aria-hidden="true" /> Recorded
-                    </span>
+                    <Clock3 size={11} aria-hidden="true" />
                     <time dateTime={event.changed_at}>
                       {displayDateTime(event.changed_at)}
                     </time>

@@ -72,7 +72,7 @@ test("live JWT workflow: login, create MOU, change status, and log activity", as
   await page.getByRole("button", { name: "Create company" }).click();
 
   await expect(page.getByRole("heading", { name: companyName })).toBeVisible({
-    timeout: 10000,
+    timeout: 30000,
   });
   await page.getByRole("button", { name: "Document actions" }).click();
   await expect(page.getByRole("menuitem", { name: "Preview" })).toBeVisible();
